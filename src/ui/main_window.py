@@ -1,12 +1,12 @@
-"""Скелет главного окна приложения замены фона.
+"""Главное окно приложения замены фона.
 
 Три зоны:
     1. меню + тулбар;
     2. результат: параметры задачи слева, предпросмотр с вкладками справа;
     3. служебные сообщения: прогресс, кнопка «Стоп», лог.
 
-Тяжёлые операции (вырезка, генерация, апскейл, композит) пока заглушены.
-Открытие файлов, предпросмотр и сохранение кадра работают по-настоящему.
+Вырезка, генерация фона, апскейл и сборка композита выполняются в
+``CoreWorker`` (QThread) с прогрессом и отменой; логика — в ``src.core``.
 """
 from __future__ import annotations
 
@@ -70,8 +70,12 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from src.core.tasks import CUTOUT_FILE, compose_task, cut_task, genbg_task, upscale_task
+
+from .defaults import APP_DEFAULTS
 from .settings_dialog import SettingsDialog
 from .styles import THEMES
+from .workers import CoreWorker
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT / "data"
@@ -509,6 +513,7 @@ class MainWindow(QMainWindow):
         self.background_path: Path | None = None
         self.sliders: dict[str, tuple[QSlider, int, QLabel, str]] = {}
         self.previews: dict[str, tuple[ImagePreview, ...]] = {}
+        self._worker: CoreWorker | None = None
 
         self._init_ui()
         self._connect_actions()
@@ -516,12 +521,12 @@ class MainWindow(QMainWindow):
         self._center_on_screen()
         self._ui_ready = True
 
-        self._log("OK", "Скелет окна готов. Откройте исходное фото через Файл → Открыть исходное фото.")
+        self._log("OK", "Готово. Откройте исходное фото через Файл → Открыть исходное фото.")
 
     # ---------- построение окна ----------
 
     def _init_ui(self) -> None:
-        self.setWindowTitle("Photo — замена фона (скелет)")
+        self.setWindowTitle("Photo — замена фона")
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setMinimumSize(800, 600)
         self.resize(1240, 820)
@@ -716,12 +721,12 @@ class MainWindow(QMainWindow):
         self.tb_open_source = action("Открыть фото", "SP_DialogOpenButton", "Выбрать исходное изображение")
         self.tb_open_background = action("Выбрать фон", "SP_DialogOpenButton", "Выбрать изображение фона")
         toolbar.addSeparator()
-        self.tb_cut = action("Вырезать", "SP_MediaPlay", "Вырезать объект (пока заглушка)")
+        self.tb_cut = action("Вырезать", "SP_MediaPlay", "Вырезать объект")
         self.tb_cut.setIcon(_solid_icon("SP_MediaPlay", "#16a34a"))
-        self.tb_generate = action("Сгенерировать фон", "SP_BrowserReload", "Генерация фона (пока заглушка)")
-        self.tb_upscale = action("Апскейл", "SP_ArrowUp", "Апскейл ×4 (пока заглушка)")
+        self.tb_generate = action("Сгенерировать фон", "SP_BrowserReload", "Генерация фона")
+        self.tb_upscale = action("Апскейл", "SP_ArrowUp", "Апскейл ×4 выбранного фона")
         self.tb_upscale.setIcon(_solid_icon("SP_ArrowUp", "#0ea5e9"))
-        self.tb_compose = action("Собрать", "SP_DialogApplyButton", "Собрать композит (пока заглушка)")
+        self.tb_compose = action("Собрать", "SP_DialogApplyButton", "Собрать композит")
         toolbar.addSeparator()
         self.tb_stop = action("Стоп", "SP_BrowserStop", "Остановить операцию")
         self.tb_stop.setEnabled(False)
@@ -996,17 +1001,18 @@ class MainWindow(QMainWindow):
 
         self.tb_open_source.triggered.connect(self.open_source)
         self.tb_open_background.triggered.connect(self.open_background)
-        self.tb_cut.triggered.connect(lambda: self._stub("Вырезка"))
-        self.tb_generate.triggered.connect(lambda: self._stub("Генерация фона"))
-        self.tb_upscale.triggered.connect(lambda: self._stub("Апскейл"))
-        self.tb_compose.triggered.connect(lambda: self._stub("Сборка композита"))
-        self.tb_stop.triggered.connect(lambda: self._log("INFO", "Операция не запущена — останавливать нечего."))
+        self.tb_cut.triggered.connect(self.run_cut)
+        self.tb_generate.triggered.connect(self.run_generate)
+        self.tb_upscale.triggered.connect(self.run_upscale)
+        self.tb_compose.triggered.connect(self.run_compose)
+        self.tb_stop.triggered.connect(self.stop_operation)
         self.tb_save.triggered.connect(self.save_result)
 
         self.btn_pick_source.clicked.connect(self.open_source)
         self.btn_pick_background.clicked.connect(self.open_background)
-        self.btn_cut.clicked.connect(lambda: self._stub("Вырезка"))
-        self.btn_compose.clicked.connect(lambda: self._stub("Сборка композита"))
+        self.btn_cut.clicked.connect(self.run_cut)
+        self.btn_compose.clicked.connect(self.run_compose)
+        self.btn_stop.clicked.connect(self.stop_operation)
 
     # ---------- действия ----------
 
@@ -1041,11 +1047,12 @@ class MainWindow(QMainWindow):
         if path:
             self._set_background(Path(path))
 
-    def _set_background(self, path: Path) -> None:
+    def _set_background(self, path: Path, quiet: bool = False) -> None:
         if self.previews["Фон"][0].set_image(path):
             self.background_path = path
             self.lbl_background.setText(str(path))
-            self._log("OK", f"Фон: {path}")
+            if not quiet:
+                self._log("OK", f"Фон: {path}")
 
     def _bg_files(self) -> list[Path]:
         if not BG_DIR.exists():
@@ -1146,8 +1153,141 @@ class MainWindow(QMainWindow):
         _slider, factor, label, fmt = self.sliders[key]
         label.setText(fmt.format(value / factor))
 
-    def _stub(self, name: str) -> None:
-        self._log("INFO", f"«{name}» — заглушка скелета, операция ещё не подключена к core.")
+    # ---------- фоновые операции ----------
+
+    def run_cut(self) -> None:
+        params = self.current_params()
+        if not params["source"]:
+            self._log("WARN", "Вырезка: сначала откройте исходное фото.")
+            return
+        self._start_worker(
+            "Вырезка", cut_task, params["source"],
+            options={
+                "portrait": params["portrait"],
+                "model": params["cut_model"],
+                "tile": params["cut_tile"],
+                "sigma": params["cut_sigma"],
+                "head_ratio": params["cut_head_ratio"],
+                "matting": params["cut_matting"],
+            },
+        )
+
+    def run_generate(self) -> None:
+        params = self.current_params()
+        prompt = str(params["prompt"]).strip()
+        if not prompt:
+            self._log("WARN", "Генерация фона: введите промпт в панели параметров.")
+            return
+        self._start_worker(
+            "Генерация фона", genbg_task, prompt,
+            options={
+                "provider": params["provider"],
+                "seed": params["bg_seed"],
+                "do_upscale": params["do_upscale"],
+            },
+        )
+
+    def run_upscale(self) -> None:
+        params = self.current_params()
+        if not params["background"]:
+            self._log("WARN", "Апскейл: сначала выберите фон.")
+            return
+        self._start_worker("Апскейл", upscale_task, params["background"])
+
+    def run_compose(self) -> None:
+        params = self.current_params()
+        if not params["source"] or not params["background"]:
+            self._log("WARN", "Сборка композита: нужны исходное фото и фон.")
+            return
+        if not Path(CUTOUT_FILE).exists():
+            self._log("WARN", "Сборка композита: сначала вырежьте объект.")
+            return
+        self._start_worker(
+            "Сборка композита", compose_task, str(CUTOUT_FILE), params["background"],
+            options={
+                "blur": params["blur"],
+                "shadow": params["shadow"],
+                "tone": params["tone"],
+                "grain": params["grain"],
+                "seed": params["compose_seed"],
+            },
+        )
+
+    def stop_operation(self) -> None:
+        if self._worker is None or not self._worker.isRunning():
+            self._log("INFO", "Операция не запущена — останавливать нечего.")
+            return
+        self._worker.cancel()
+        self._log("WARN", "Отмена запрошена — операция остановится на следующем этапе.")
+
+    def _start_worker(self, name: str, func, *args, **kwargs) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            self._log("WARN", f"«{name}» не запущена: выполняется другая операция.")
+            return
+        worker = CoreWorker(func, *args, **kwargs)
+        self._worker = worker
+        worker.progress.connect(self._on_progress)
+        worker.succeeded.connect(lambda result, n=name: self._on_operation_success(n, result))
+        worker.failed.connect(lambda message, n=name: self._on_operation_failed(n, message))
+        worker.cancelled.connect(lambda n=name: self._on_operation_cancelled(n))
+        worker.finished.connect(self._on_worker_finished)
+        self._set_busy(True)
+        self._log("INFO", f"{name}: запуск…")
+        worker.start()
+
+    def _set_busy(self, busy: bool) -> None:
+        for widget in (
+            self.tb_cut, self.tb_generate, self.tb_upscale, self.tb_compose,
+            self.tb_save, self.act_save_result, self.btn_cut, self.btn_compose,
+        ):
+            widget.setEnabled(not busy)
+        self.btn_stop.setEnabled(busy)
+        self.tb_stop.setEnabled(busy)
+        if busy:
+            self.progress.setRange(0, 0)  # неопределённый режим до первого отчёта
+            self.progress.setValue(0)
+        elif self.progress.maximum() == 0:
+            self.progress.setRange(0, 100)
+
+    def _on_progress(self, percent: int, message: str) -> None:
+        if percent < 0:
+            self.progress.setRange(0, 0)
+        else:
+            if self.progress.maximum() == 0:
+                self.progress.setRange(0, 100)
+            self.progress.setValue(max(0, min(100, percent)))
+        if message:
+            self.statusBar().showMessage(message)
+
+    def _on_operation_success(self, name: str, result) -> None:
+        path = Path(str(result))
+        if name == "Вырезка":
+            self._show_preview("Вырезка", path)
+        elif name in ("Генерация фона", "Апскейл"):
+            self._set_background(path, quiet=True)
+        elif name == "Сборка композита":
+            self._show_preview("Результат", path)
+            self._show_preview("До — После", path, 1)
+        self._log("OK", f"{name}: {path}")
+
+    def _on_operation_failed(self, name: str, message: str) -> None:
+        self._log("ERROR", f"{name}: {message}")
+
+    def _on_operation_cancelled(self, name: str) -> None:
+        self._log("WARN", f"{name}: отменено.")
+
+    def _on_worker_finished(self) -> None:
+        worker = self._worker
+        self._set_busy(False)
+        self.statusBar().showMessage("Готово", 3000)
+        self._worker = None
+        if worker is not None:
+            worker.deleteLater()
+
+    def _show_preview(self, tab: str, path: Path, index: int = 0) -> None:
+        preview = self.previews[tab][index]
+        if not preview.set_image(path):
+            self._log("ERROR", f"Не удалось показать {path} во вкладке «{tab}».")
 
     def _log(self, level: str, message: str) -> None:
         color = LEVEL_COLORS.get(level, "#e2e8f0")
@@ -1160,16 +1300,19 @@ class MainWindow(QMainWindow):
 
     def _load_settings(self) -> None:
         s = self.settings
-        index = self.cut_model.findText(str(s.value("cut/model", CUT_MODELS[0])))
+        index = self.cut_model.findText(str(s.value("cut/model", APP_DEFAULTS["cut/model"])))
         if index >= 0:
             self.cut_model.setCurrentIndex(index)
-        self.portrait.setChecked(s.value("cut/portrait", True, type=bool))
-        self.prompt.setPlainText(
-            str(s.value("bg/prompt", "realistic photo, no people, no text, soft overcast light"))
-        )
+        self.portrait.setChecked(s.value("cut/portrait", APP_DEFAULTS["cut/portrait"], type=bool))
+        self.prompt.setPlainText(str(s.value("bg/prompt", APP_DEFAULTS["bg/prompt"])))
         # Ползунки хранят масштабированные целые, а диалог настроек —
         # вещественные значения. Приводим к одному формату на чтении.
-        defaults = {"blur": 0.5, "shadow": 0.22, "tone": 1.06, "grain": 4.5}
+        defaults = {
+            "blur": APP_DEFAULTS["compose/blur"],
+            "shadow": APP_DEFAULTS["compose/shadow"],
+            "tone": APP_DEFAULTS["compose/tone"],
+            "grain": APP_DEFAULTS["compose/grain"],
+        }
         for key, default in defaults.items():
             raw = s.value(f"compose/{key}", default)
             try:
@@ -1193,14 +1336,28 @@ class MainWindow(QMainWindow):
         self.zoom_slider.setValue(0)
         self._sync_zoom_controls()
 
+    def _setting_number(self, key: str, default, cast):
+        try:
+            return cast(self.settings.value(key, default))
+        except (TypeError, ValueError):
+            return default
+
     def current_params(self) -> dict:
-        """Текущие параметры задачи — понадобятся воркерам после подключения core."""
+        """Параметры задачи для воркеров: UI, ползунки и раздел настроек."""
         params = {
             "cut_model": self.cut_model.currentText(),
             "portrait": self.portrait.isChecked(),
             "prompt": self.prompt.toPlainText(),
             "source": str(self.source_path) if self.source_path else None,
             "background": str(self.background_path) if self.background_path else None,
+            "provider": str(self.settings.value("bg/provider_api", APP_DEFAULTS["bg/provider_api"])),
+            "bg_seed": self._setting_number("bg/seed", APP_DEFAULTS["bg/seed"], int),
+            "do_upscale": bool(self.settings.value("bg/upscale", APP_DEFAULTS["bg/upscale"], type=bool)),
+            "cut_tile": self._setting_number("cut/tile", APP_DEFAULTS["cut/tile"], int),
+            "cut_sigma": self._setting_number("cut/sigma", APP_DEFAULTS["cut/sigma"], float),
+            "cut_head_ratio": self._setting_number("cut/head_ratio", APP_DEFAULTS["cut/head_ratio"], float),
+            "cut_matting": bool(self.settings.value("cut/matting", APP_DEFAULTS["cut/matting"], type=bool)),
+            "compose_seed": self._setting_number("compose/seed", APP_DEFAULTS["compose/seed"], int),
         }
         for key, (slider, factor, _, _) in self.sliders.items():
             params[key] = slider.value() / factor

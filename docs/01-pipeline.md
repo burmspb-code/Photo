@@ -3,20 +3,23 @@
 ## Схема
 
 ```text
-OpenCode (плагин photo-tools)   или   PyCharm / терминал
+OpenCode (плагин photo-tools)   или   PyCharm / терминал   или   GUI (main.py)
   │
   ├── .venv\Scripts\python.exe            Poetry-окружение Python 3.14
   │     ├── src\photo_pipeline.py          CLI-адаптер (разбор аргументов)
+  │     ├── src\ui\workers.py              QThread: прогресс и отмена
   │     └── src\core\                      основная логика
   │           ├── cutout.py                BiRefNet + pymatting, вырезка
   │           ├── backgrounds.py           Cloudflare / Google / Stability / HF / Pollinations
   │           ├── upscale.py               Real-ESRGAN ×4
-  │           └── compose.py               OpenCV, композит
+  │           ├── compose.py               OpenCV, композит
+  │           ├── progress.py              колбэки прогресса и check_cancel
+  │           └── tasks.py                 файловые задачи для GUI
   ├── models\                              ONNX-модели внутри проекта
   └── data\                                все изображения
 ```
 
-Плагин `photo-tools` — обёртка: запускает Python-скрипт и подставляет пути. `src\photo_pipeline.py` остался тонким CLI-адаптером, вся логика лежит в `src\core\`; пути запуска для плагина не изменились. Плагин берёт `.venv` и `src\photo_pipeline.py`, а если их нет — откатывается на старое окружение `%LOCALAPPDATA%\rembg-env`.
+Плагин `photo-tools` — обёртка: запускает Python-скрипт и подставляет пути. `src\photo_pipeline.py` остался тонким CLI-адаптером, вся логика лежит в `src\core\`; пути запуска для плагина не изменились. Плагин берёт `.venv` и `src\photo_pipeline.py`, а если их нет — откатывается на старое окружение `%LOCALAPPDATA%\rembg-env`. GUI вызывает те же функции через `src\core\tasks.py` и `CoreWorker`, не запуская отдельный процесс.
 
 ## Проект и окружения
 

@@ -1,7 +1,8 @@
 """Диалог настроек: параметры моделей и пользовательские параметры.
 
-Пока хранит значения в QSettings и не влияет на расчётный код — подключение
-к `core` будет следующим шагом. Ключи API в диалоге не показываются.
+Значения читаются и пишутся в QSettings и используются ядром через
+``MainWindow.current_params()``. Предустановки берутся из ``ui.defaults`` —
+одного источника проверенных значений. Ключи API в диалоге не показываются.
 """
 from __future__ import annotations
 
@@ -22,6 +23,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from .defaults import APP_DEFAULTS
 
 CUT_MODELS = (
     "birefnet-general",
@@ -68,7 +71,7 @@ class SettingsDialog(QDialog):
     def _add(self, form: QFormLayout, key: str, label: str, widget: QWidget, default) -> QWidget:
         form.addRow(label, widget)
         self.controls[key] = widget
-        self.defaults[key] = default
+        self.defaults[key] = APP_DEFAULTS.get(key, default)
         return widget
 
     @staticmethod

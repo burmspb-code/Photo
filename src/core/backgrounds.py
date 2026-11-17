@@ -4,7 +4,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-import time
 import urllib.parse
 import urllib.request
 import uuid
@@ -14,6 +13,13 @@ import cv2
 import numpy as np
 
 from src.core.image import _write
+from src.core.progress import (
+    CancelledError,
+    check_cancel,
+    maybe_report,
+    scaled,
+    sleep_or_cancel,
+)
 from src.core.settings import (
     CF_CREDS,
     ESR_MODEL,
@@ -271,10 +277,11 @@ def genbg_google(prompt, out, width=1632, height=1224, model=None, key=None):
     return model
 
 
-def _pollinations(prompt, out, width, height, seed, retries):
+def _pollinations(prompt, out, width, height, seed, retries, cancelled=None):
     url = ("https://image.pollinations.ai/prompt/" + urllib.parse.quote(prompt)
            + f"?width={width}&height={height}&seed={seed}&nologo=true")
     for _attempt in range(retries):
+        check_cancel(cancelled)
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=180) as r:  # noqa: S310 — HTTPS, хост задан константой
@@ -285,6 +292,8 @@ def _pollinations(prompt, out, width, height, seed, retries):
             Path(out).write_bytes(data)
             print(f"Pollinations: {out} ({len(data)//1024} KB)", flush=True)
             return
+        except CancelledError:
+            raise
         except urllib.error.HTTPError as e:
             if e.code == 402:
                 wait = 60
@@ -292,16 +301,16 @@ def _pollinations(prompt, out, width, height, seed, retries):
                     wait = int(float(e.headers.get("Retry-After", 60)))
                 except Exception:  # noqa: S110 — некорректный Retry-After → оставляем 60 секунд
                     pass
-                time.sleep(wait + 2)
+                sleep_or_cancel(wait + 2, cancelled)
             else:
-                time.sleep(8)
+                sleep_or_cancel(8, cancelled)
         except Exception:
-            time.sleep(8)
+            sleep_or_cancel(8, cancelled)
     raise RuntimeError("лимит или сеть недоступны")
 
 
 def genbg(prompt, out, width=886, height=664, seed=7, retries=5, do_upscale=True,
-          provider="auto", model=None):
+          provider="auto", model=None, progress=None, cancelled=None):
     order = {
         "auto": ["google", "cloudflare", "stability", "huggingface", "pollinations"],
         "google": ["google"],
@@ -312,7 +321,10 @@ def genbg(prompt, out, width=886, height=664, seed=7, retries=5, do_upscale=True
     }.get(provider, ["pollinations"])
 
     errors = []
+    maybe_report(progress, 0, f"Провайдеров в очереди: {len(order)}")
     for p in order:
+        check_cancel(cancelled)
+        maybe_report(progress, len(errors) * 60 // len(order), f"Провайдер: {p}")
         try:
             if p == "google":
                 genbg_google(prompt, out, 1632, 1224, model=model)
@@ -323,10 +335,15 @@ def genbg(prompt, out, width=886, height=664, seed=7, retries=5, do_upscale=True
             elif p == "huggingface":
                 genbg_hf(prompt, out, 1632, 1224, model=model or "black-forest-labs/FLUX.1-schnell")
             else:
-                _pollinations(prompt, out, width, height, seed, retries)
+                _pollinations(prompt, out, width, height, seed, retries, cancelled=cancelled)
             if do_upscale and ESR_MODEL.exists():
-                upscale(out, out)
+                check_cancel(cancelled)
+                upscale(out, out, progress=scaled(progress, 60, 100), cancelled=cancelled)
+            else:
+                maybe_report(progress, 100, "Фон готов")
             return
+        except CancelledError:
+            raise
         except Exception as e:
             errors.append(f"{p}: {e}")
             print(f"{p}: {e}", flush=True)

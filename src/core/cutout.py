@@ -10,26 +10,33 @@ from rembg import remove, new_session
 from pymatting import estimate_foreground_ml
 
 from src.core.image import _blur, _levels, _read, _write
+from src.core.progress import check_cancel, maybe_report, scaled
 
 _session = None
+_session_model = None
 
 
-def get_session():
-    global _session
-    if _session is None:
-        _session = new_session("birefnet-general")
+def get_session(model=None):
+    global _session, _session_model
+    model = model or "birefnet-general"
+    if _session is None or _session_model != model:
+        _session = new_session(model)
+        _session_model = model
     return _session
 
 
-def tiled_alpha(orig, tile=1024):
+def tiled_alpha(orig, tile=1024, model=None, progress=None, cancelled=None):
     H, W = orig.shape[:2]
     xs = [0, W - tile] if W > tile else [0]
     ys = [0, H - tile] if H > tile else [0]
     acc = np.zeros((H, W), np.float32)
     wsum = np.zeros((H, W), np.float32)
-    sess = get_session()
+    sess = get_session(model)
+    total = len(xs) * len(ys)
+    done = 0
     for ty in ys:
         for tx in xs:
+            check_cancel(cancelled)
             x0, y0 = max(0, tx), max(0, ty)
             y1, x1 = min(H, y0 + tile), min(W, x0 + tile)
             crop = orig[y0:y1, x0:x1]
@@ -42,6 +49,8 @@ def tiled_alpha(orig, tile=1024):
             wgt = np.maximum(np.outer(np.hanning(max(th, 2)), np.hanning(max(tw, 2))).astype(np.float32), 1e-3)
             acc[y0:y1, x0:x1] += a * wgt
             wsum[y0:y1, x0:x1] += wgt
+            done += 1
+            maybe_report(progress, done * 100 // total, f"Сегментация {done}/{total}")
     return np.clip(acc / np.maximum(wsum, 1e-6), 0, 1)
 
 
@@ -61,15 +70,27 @@ def refine_alpha(a_raw, portrait=True, head_ratio=0.34, sigma=1.4):
     return np.clip(a * (1 - w) + _blur(a, sigma) * w, 0, 1)
 
 
-def make_cutout(src, portrait=True):
+def make_cutout(src, portrait=True, model=None, tile=1024, sigma=1.4, head_ratio=0.34,
+                matting=True, progress=None, cancelled=None):
+    maybe_report(progress, 0, "Чтение изображения")
     orig = _read(src)
     if orig.ndim == 2:
         orig = cv2.cvtColor(orig, cv2.COLOR_GRAY2BGR)
     orig = orig[:, :, :3]
-    alpha = refine_alpha(tiled_alpha(orig), portrait=portrait)
-    F = estimate_foreground_ml(orig.astype(np.float64) / 255.0, alpha.astype(np.float64),
-                               return_background=False)
-    rgb = np.clip(F * 255, 0, 255).astype(np.uint8)
+    raw = tiled_alpha(orig, tile=tile, model=model,
+                      progress=scaled(progress, 0, 70), cancelled=cancelled)
+    maybe_report(progress, 75, "Уточнение кромки")
+    alpha = refine_alpha(raw, portrait=portrait, head_ratio=head_ratio, sigma=sigma)
+    check_cancel(cancelled)
+    if matting:
+        maybe_report(progress, 85, "Восстановление цвета")
+        F = estimate_foreground_ml(orig.astype(np.float64) / 255.0, alpha.astype(np.float64),
+                                   return_background=False)
+        rgb = np.clip(F * 255, 0, 255).astype(np.uint8)
+    else:
+        maybe_report(progress, 85, "Без pymatting")
+        rgb = orig
+    maybe_report(progress, 100, "Вырезка готова")
     return np.dstack([rgb, (alpha * 255).astype(np.uint8)])
 
 
