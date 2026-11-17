@@ -38,8 +38,10 @@ C:\My_projects\Photo\
 ├── models\                 ONNX-модели (faceparser, realesr-general-x4v3)
 ├── src\                    код проекта
 │   ├── __init__.py
-│   ├── photo_pipeline.py           вырезка, фон, апскейл, композит
-│   └── contact_sheet.py            контактные листы и сравнения
+│   ├── photo_pipeline.py           CLI-адаптер
+│   ├── contact_sheet.py            контактные листы и сравнения
+│   ├── ui\                         GUI на PyQt6
+│   └── core\                       вырезка, фон, апскейл, композит
 ├── AGENTS.md               шпаргалка для агента
 ├── README.md               краткое описание проекта
 ├── pyproject.toml          метаданные Poetry

@@ -6,7 +6,7 @@
 
 - Корень: `C:\My_projects\Photo`
 - Данные: `data\` (черновики — `data\bg\`, утверждённые результаты — `data\results\`)
-- Код: `main.py` (GUI), `src\ui\` (интерфейс), `src\photo_pipeline.py`, `src\contact_sheet.py` (CLI)
+- Код: `main.py` (GUI), `src\ui\` (интерфейс), `src\core\` (основная логика), `src\photo_pipeline.py`, `src\contact_sheet.py` (CLI)
 - Модели: `models\` (ONNX)
 - Документация: [docs/README.md](docs/README.md)
 - Утверждённый результат: [data/results/2026-11-17-park-c](data/results/2026-11-17-park-c/README.md)

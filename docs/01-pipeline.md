@@ -6,16 +6,17 @@
 OpenCode (плагин photo-tools)   или   PyCharm / терминал
   │
   ├── .venv\Scripts\python.exe            Poetry-окружение Python 3.14
-  │     └── src\photo_pipeline.py          код пайплайна в проекте
-  │           ├── BiRefNet + pymatting     вырезка
-  │           ├── Cloudflare / Google / Stability / HF / Pollinations   фон
-  │           ├── Real-ESRGAN ×4           апскейл
-  │           └── OpenCV                   композит
+  │     ├── src\photo_pipeline.py          CLI-адаптер (разбор аргументов)
+  │     └── src\core\                      основная логика
+  │           ├── cutout.py                BiRefNet + pymatting, вырезка
+  │           ├── backgrounds.py           Cloudflare / Google / Stability / HF / Pollinations
+  │           ├── upscale.py               Real-ESRGAN ×4
+  │           └── compose.py               OpenCV, композит
   ├── models\                              ONNX-модели внутри проекта
   └── data\                                все изображения
 ```
 
-Плагин `photo-tools` — обёртка: запускает Python-скрипт и подставляет пути. Логика целиком в `src\photo_pipeline.py`. Плагин берёт `.venv` и `src\photo_pipeline.py`, а если их нет — откатывается на старое окружение `%LOCALAPPDATA%\rembg-env`.
+Плагин `photo-tools` — обёртка: запускает Python-скрипт и подставляет пути. `src\photo_pipeline.py` остался тонким CLI-адаптером, вся логика лежит в `src\core\`; пути запуска для плагина не изменились. Плагин берёт `.venv` и `src\photo_pipeline.py`, а если их нет — откатывается на старое окружение `%LOCALAPPDATA%\rembg-env`.
 
 ## Проект и окружения
 
@@ -23,7 +24,7 @@ OpenCode (плагин photo-tools)   или   PyCharm / терминал
 |---|---|
 | Корень проекта | `C:\My_projects\Photo` |
 | Данные | `data\` (черновики — `data\bg\`, результаты — `data\results\`) |
-| Код | `src\photo_pipeline.py`, `src\contact_sheet.py` |
+| Код | `src\core\`, `src\photo_pipeline.py` (CLI), `src\contact_sheet.py`, `src\ui\` (GUI) |
 | Модели | `models\faceparser.onnx`, `models\realesr-general-x4v3.onnx` |
 | Poetry-окружение | `.venv\` (Python 3.14, интерпретатор PyCharm) |
 | Метаданные Poetry | `pyproject.toml`, `poetry.lock` |
@@ -179,7 +180,7 @@ google → cloudflare → stability → huggingface → pollinations
 
 ## Особенности окружения
 
-- **IPv6 зависает.** В `photo_pipeline.py` стоит патч `socket.getaddrinfo`, который принудительно предпочитает IPv4. Сторонние клиенты и Node `fetch` этого патча не имеют — для разовых запросов использовать `curl.exe -4`.
+- **IPv6 зависает.** В `src\core\settings.py` стоит патч `socket.getaddrinfo`, который принудительно предпочитает IPv4 (применяется до импорта rembg). Сторонние клиенты и Node `fetch` этого патча не имеют — для разовых запросов использовать `curl.exe -4`.
 - **Node/npm/bun не установлены.** TS-плагин не собирается; OpenCode загружает его сам. Если плагин не появился — смотреть `%USERPROFILE%\.local\share\opencode\log\opencode.log`.
 - **Прав администратора нет.** `hosts` и системные установки недоступны.
 - **PowerShell искажает кириллицу в консоли.** Файлы в UTF-8, это только отображение. Путь проекта ASCII; кириллица осталась только в пути исходника (`Изображения`).
