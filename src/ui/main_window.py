@@ -47,7 +47,6 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
-    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QGraphicsOpacityEffect,
@@ -62,7 +61,6 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSlider,
-    QSpinBox,
     QSplitter,
     QStyle,
     QTabWidget,
@@ -696,8 +694,8 @@ class MainWindow(QMainWindow):
                 ctypes.byref(value),
                 ctypes.sizeof(value),
             )
-        except Exception:
-            pass  # старые версии Windows игнорируют атрибут
+        except Exception:  # noqa: S110 — API есть не во всех версиях Windows
+            pass
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -1119,7 +1117,7 @@ class MainWindow(QMainWindow):
             value = 0
         else:
             factor = preview.fit_factor()
-            value = int(round(math.log2(zoom / factor) * 100)) if factor > 0 and zoom > 0 else 0
+            value = round(math.log2(zoom / factor) * 100) if factor > 0 and zoom > 0 else 0
         blocker = QSignalBlocker(self.zoom_slider)
         self.zoom_slider.setValue(max(-100, min(100, value)))
         blocker.unblock()
@@ -1145,7 +1143,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("ui/show_log", checked)
 
     def _on_slider(self, key: str, value: int) -> None:
-        slider, factor, label, fmt = self.sliders[key]
+        _slider, factor, label, fmt = self.sliders[key]
         label.setText(fmt.format(value / factor))
 
     def _stub(self, name: str) -> None:
@@ -1179,7 +1177,7 @@ class MainWindow(QMainWindow):
             except (TypeError, ValueError):
                 value = default
             slider, factor, _, _ = self.sliders[key]
-            slider.setValue(int(round(value * factor)))
+            slider.setValue(round(value * factor))
         self._apply_theme(str(s.value("ui/theme", "Тёмная")))
         for action, key, widget in (
             (self.act_show_params, "ui/show_params", self.params_zone),

@@ -5,12 +5,23 @@ Commands:
   composite <cutout.png> <background> <out.jpg> [--shadow 0.22] [--tone 1.06] [--grain 4.5] [--blur 2.0]
   hair      <source> <out.jpg|png> [--color rusy] [--strength 0.85]
   analyze   <source>
-  genbg     <prompt> <out.jpg> [--width 886] [--height 664] [--seed 7] [--no-upscale] [--provider auto|google|cloudflare|stability|huggingface|pollinations] [--model ...]
+  genbg     <prompt> <out.jpg> [--width 886] [--height 664] [--seed 7] [--no-upscale]
+            [--provider auto|google|cloudflare|stability|huggingface|pollinations] [--model ...]
   upscale   <source> <out.jpg|png>
 """
-import sys, os, json, time, base64, socket, uuid, urllib.parse, urllib.request
+import base64
+import json
+import os
+import socket
+import sys
+import time
+import urllib.parse
+import urllib.request
+import uuid
 from pathlib import Path
-import numpy as np, cv2
+
+import cv2
+import numpy as np
 
 # На этой сети IPv6 часто зависает — принудительно предпочитаем IPv4.
 _orig_getaddrinfo = socket.getaddrinfo
@@ -21,14 +32,14 @@ def _prefer_ipv4(host, port, family=0, type=0, proto=0, flags=0):
         res = _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
         if res:
             return res
-    except Exception:
+    except Exception:  # noqa: S110 — при ошибке пробуем исходный getaddrinfo
         pass
     return _orig_getaddrinfo(host, port, family, type, proto, flags)
 
 
 socket.getaddrinfo = _prefer_ipv4
-from rembg import remove, new_session
-from pymatting import estimate_foreground_ml
+from rembg import remove, new_session  # noqa: E402 — патч IPv4 должен быть установлен до импорта
+from pymatting import estimate_foreground_ml  # noqa: E402
 
 HERE = Path(__file__).resolve().parent              # src\
 PROJECT_ROOT = HERE.parent                          # корень проекта
@@ -60,7 +71,10 @@ HAIR_COLORS = {
     "dark_brown": (84, 60, 44),
     "red": (150, 74, 48),
 }
-GOOGLE_KEY_FILE = Path(os.environ.get("PHOTO_GOOGLE_KEY_FILE") or (Path.home() / ".config" / "opencode" / "photo-tools.json"))
+GOOGLE_KEY_FILE = Path(
+    os.environ.get("PHOTO_GOOGLE_KEY_FILE")
+    or (Path.home() / ".config" / "opencode" / "photo-tools.json")
+)
 GOOGLE_KEY_TXT = Path(os.environ.get("PHOTO_GOOGLE_KEY") or (RUNTIME_DIR / "google_api_key.txt"))
 CF_CREDS = Path(os.environ.get("PHOTO_CLOUDFLARE_CREDS") or (RUNTIME_DIR / "cloudflare.json"))
 HF_TOKEN_TXT = Path(os.environ.get("PHOTO_HF_TOKEN") or (RUNTIME_DIR / "hf_token.txt"))
@@ -252,7 +266,7 @@ def recolor_hair(src, out, color="rusy", strength=0.85):
     sel = mask > 0.5
     if sel.sum() < 10:
         raise RuntimeError("маска волос слишком мала")
-    mL, mA, mB = L[sel].mean(), A[sel].mean(), B[sel].mean()
+    mL, _mA, _mB = L[sel].mean(), A[sel].mean(), B[sel].mean()
     L2 = L * (t_lab[0] / max(mL, 1))
     L2 = L * 0.15 + L2 * 0.85
     A2 = A * 0.35 + t_lab[1] * 0.65
@@ -342,7 +356,7 @@ def cf_creds():
         try:
             d = json.loads(CF_CREDS.read_text(encoding="utf-8"))
             return (d.get("account_id") or "").strip(), (d.get("token") or "").strip()
-        except Exception:
+        except Exception:  # noqa: S110 — некорректный файл ключей означает отсутствие ключа
             pass
     return "", ""
 
@@ -387,11 +401,11 @@ def genbg_cloudflare(prompt, out, width=1632, height=1224, model="@cf/black-fore
         f"https://api.cloudflare.com/client/v4/accounts/{acc}/ai/run/{model}",
         data=body, headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=240) as r:
+        with urllib.request.urlopen(req, timeout=240) as r:  # noqa: S310 — HTTPS, хост задан константой
             data = json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
         msg = e.read().decode("utf-8", "replace")[:300]
-        raise RuntimeError(f"Cloudflare API {e.code}: {msg}")
+        raise RuntimeError(f"Cloudflare API {e.code}: {msg}") from e
     if not data.get("success"):
         raise RuntimeError(f"Cloudflare API: {json.dumps(data.get('errors'))[:300]}")
     b64 = (data.get("result") or {}).get("image")
@@ -414,11 +428,11 @@ def genbg_hf(prompt, out, width=1024, height=768, model="black-forest-labs/FLUX.
         data=json.dumps(payload).encode(),
         headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json", "Accept": "image/png"})
     try:
-        with urllib.request.urlopen(req, timeout=300) as r:
+        with urllib.request.urlopen(req, timeout=300) as r:  # noqa: S310 — HTTPS, хост задан константой
             raw = r.read()
     except urllib.error.HTTPError as e:
         msg = e.read().decode("utf-8", "replace")[:300]
-        raise RuntimeError(f"Hugging Face API {e.code}: {msg}")
+        raise RuntimeError(f"Hugging Face API {e.code}: {msg}") from e
     if raw[:1] == b"{":
         raise RuntimeError(f"Hugging Face API: {raw[:300].decode('utf-8', 'replace')}")
     img = _decode_save(raw, out)
@@ -467,7 +481,7 @@ def genbg_stability(prompt, out, width=1632, height=1224, model=None):
             headers={"Authorization": f"Bearer {key}", "Accept": "image/*",
                      "Content-Type": f"multipart/form-data; boundary={boundary}"})
         try:
-            with urllib.request.urlopen(req, timeout=300) as r:
+            with urllib.request.urlopen(req, timeout=300) as r:  # noqa: S310 — HTTPS, хост задан константой
                 raw = r.read()
         except urllib.error.HTTPError as e:
             msg = e.read().decode("utf-8", "replace")[:400]
@@ -475,7 +489,7 @@ def genbg_stability(prompt, out, width=1632, height=1224, model=None):
             print(f"Stability {name}: {e.code} {msg}", flush=True)
             if e.code in (400, 402, 429):
                 continue
-            raise RuntimeError(f"Stability API {e.code}: {msg}")
+            raise RuntimeError(f"Stability API {e.code}: {msg}") from e
         except Exception as e:
             errors.append(f"{name}: {e}")
             print(f"Stability {name}: {e}", flush=True)
@@ -500,7 +514,7 @@ def google_key():
         try:
             data = json.loads(GOOGLE_KEY_FILE.read_text(encoding="utf-8"))
             return (data.get("google_api_key") or data.get("api_key") or "").strip()
-        except Exception:
+        except Exception:  # noqa: S110 — некорректный файл ключей означает отсутствие ключа
             pass
     return ""
 
@@ -509,9 +523,9 @@ def _google_json(url, key, payload=None, extra_headers=None):
     data = json.dumps(payload).encode() if payload is not None else None
     headers = {"x-goog-api-key": key, "Content-Type": "application/json"}
     headers.update(extra_headers or {})
-    req = urllib.request.Request(url, data=data, headers=headers)
+    req = urllib.request.Request(url, data=data, headers=headers)  # noqa: S310 — HTTPS-адреса API
     try:
-        with urllib.request.urlopen(req, timeout=240) as r:
+        with urllib.request.urlopen(req, timeout=240) as r:  # noqa: S310 — HTTPS-адреса API
             return json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", "replace")
@@ -519,7 +533,7 @@ def _google_json(url, key, payload=None, extra_headers=None):
             msg = json.loads(body)["error"]["message"]
         except Exception:
             msg = body[:300]
-        raise RuntimeError(f"Google API {e.code}: {msg}")
+        raise RuntimeError(f"Google API {e.code}: {msg}") from e
 
 
 def _google_image_model(preferred=None):
@@ -617,10 +631,10 @@ def genbg(prompt, out, width=886, height=664, seed=7, retries=5, do_upscale=True
 def _pollinations(prompt, out, width, height, seed, retries):
     url = ("https://image.pollinations.ai/prompt/" + urllib.parse.quote(prompt)
            + f"?width={width}&height={height}&seed={seed}&nologo=true")
-    for attempt in range(retries):
+    for _attempt in range(retries):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=180) as r:
+            with urllib.request.urlopen(req, timeout=180) as r:  # noqa: S310 — HTTPS, хост задан константой
                 data = r.read()
             if len(data) < 15000:
                 raise RuntimeError("слишком маленький ответ")
@@ -633,7 +647,7 @@ def _pollinations(prompt, out, width, height, seed, retries):
                 wait = 60
                 try:
                     wait = int(float(e.headers.get("Retry-After", 60)))
-                except Exception:
+                except Exception:  # noqa: S110 — некорректный Retry-After → оставляем 60 секунд
                     pass
                 time.sleep(wait + 2)
             else:
@@ -658,7 +672,8 @@ def main(argv):
             opts[k] = v
             i += 2 if v != "true" else 1
         else:
-            pos.append(args[i]); i += 1
+            pos.append(args[i])
+            i += 1
 
     if cmd == "cut":
         cut = make_cutout(pos[0], portrait=opts.get("no-portrait") != "true")

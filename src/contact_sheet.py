@@ -53,7 +53,7 @@ def main() -> None:
         (24, 24, 24),
     )
     draw = ImageDraw.Draw(sheet)
-    for i, (thumb, label) in enumerate(zip(thumbs, labels[: len(thumbs)])):
+    for i, (thumb, label) in enumerate(zip(thumbs, labels[: len(thumbs)], strict=False)):
         x = i * (args.width + args.gap)
         sheet.paste(thumb, (x, args.label_height))
         draw.text((x + 12, 6), label, font=font, fill=(255, 255, 255))

@@ -6,7 +6,7 @@ authors = [
     {name = "Mikhail Burdukovsky",email = "burmspb@gmail.com"}
 ]
 readme = "README.md"
-requires-python = "^3.14"
+requires-python = ">=3.14,<4.0"
 dependencies = [
     "rembg (>=2.0.87,<3.0.0)",
     "onnxruntime (>=1.32.0,<2.0.0)",
