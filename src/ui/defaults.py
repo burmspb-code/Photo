@@ -27,10 +27,10 @@ APP_DEFAULTS: dict[str, object] = {
     "compose/tone": 1.06,
     "compose/grain": 4.5,
     "compose/seed": 7,
-    # Фон: рабочий провайдер и черновики без автоматического апскейла.
+    # Фон: рабочий провайдер и конечный размер файла (1K/2K/4K, 4:3).
     "bg/provider_api": "cloudflare",
     "bg/seed": 7,
-    "bg/upscale": False,
+    "bg/size": "2K",
     "bg/prompt": "realistic photo, no people, no text, soft overcast light",
     "models/upscale": "realesr-general-x4v3",
 }

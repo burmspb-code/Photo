@@ -6,9 +6,9 @@ from pathlib import Path
 
 from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt
 from PyQt6.QtGui import QMouseEvent, QWheelEvent
-from PyQt6.QtWidgets import QApplication, QLabel
+from PyQt6.QtWidgets import QApplication, QLabel, QSplitter
 
-from src.ui.main_window import MainWindow
+from src.ui.main_window import PARAMS_WIDTH, ZOOM_MAX, ZOOM_MIN, MainWindow
 from tests.gui_case import GuiTestCase
 from tests.test_gui_helpers import dominant_color
 
@@ -28,9 +28,9 @@ class TestMainWindow(GuiTestCase):
         self.window.deleteLater()
         self.process_events()
 
-    def send_wheel(self) -> None:
+    def send_wheel(self, angle: int = 120) -> None:
         event = QWheelEvent(
-            QPointF(80, 80), QPointF(80, 80), QPoint(0, 0), QPoint(0, 120),
+            QPointF(80, 80), QPointF(80, 80), QPoint(0, 0), QPoint(0, angle),
             Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
             Qt.ScrollPhase.NoScrollPhase, False,
         )
@@ -62,9 +62,30 @@ class TestMainWindow(GuiTestCase):
 
     def test_zoom_scale_and_labels(self) -> None:
         slider = self.window.zoom_slider
-        self.assertEqual((slider.minimum(), slider.maximum()), (-100, 100))
+        self.assertEqual((slider.minimum(), slider.maximum()), (ZOOM_MIN, ZOOM_MAX))
         labels = self.area.zoom_overlay.findChildren(QLabel)
-        self.assertEqual([label.text() for label in labels], ["100", "50", "0", "-50", "-100"])
+        self.assertEqual([label.text() for label in labels], ["×4", "×2", "×1", "÷2"])
+
+    def test_zoom_labels_aligned_with_slider_handle(self) -> None:
+        slider = self.window.zoom_slider.geometry()
+        labels = self.area.zoom_overlay.findChildren(QLabel)
+        centers = [label.geometry().center().y() for label in labels]
+        # Ручка высотой 10 px: её центр ходит от top+5 до bottom−5.
+        self.assertLessEqual(abs(centers[0] - (slider.top() + 5)), 2)
+        self.assertLessEqual(abs(centers[-1] - (slider.bottom() - 5)), 2)
+        step = (centers[-1] - centers[0]) / 3
+        for index, center in enumerate(centers):
+            self.assertAlmostEqual(center, centers[0] + index * step, delta=1)
+
+    def test_zoom_wheel_clamped_to_magnification_range(self) -> None:
+        self.load_current()
+        slider = self.window.zoom_slider
+        for _ in range(50):
+            self.send_wheel()
+        self.assertEqual(slider.value(), ZOOM_MAX)
+        for _ in range(80):  # 300/5 = 60 шагов от +200 до −100
+            self.send_wheel(-120)
+        self.assertEqual(slider.value(), ZOOM_MIN)
 
     def test_zoom_values_map_to_fit_factor(self) -> None:
         self.load_current()
@@ -78,6 +99,8 @@ class TestMainWindow(GuiTestCase):
         self.assertAlmostEqual(preview.zoom, fit / 2, delta=fit * 0.01)
         self.window.zoom_slider.setValue(100)
         self.assertAlmostEqual(preview.zoom, fit * 2, delta=fit * 0.01)
+        self.window.zoom_slider.setValue(200)
+        self.assertAlmostEqual(preview.zoom, fit * 4, delta=fit * 0.01)
 
     def test_zoom_synced_when_returning_to_tab(self) -> None:
         self.load_current()
@@ -207,3 +230,54 @@ class TestMainWindow(GuiTestCase):
                      "btn_pick_background", "btn_save_current"):
             with self.subTest(name=name):
                 self.assertFalse(getattr(self.window, name).icon().isNull())
+
+    def _top_splitter(self) -> QSplitter:
+        """Горизонтальный сплиттер: панель задач | превью."""
+        return next(
+            splitter for splitter in self.window.findChildren(QSplitter)
+            if "Horizontal" in str(splitter.orientation())
+        )
+
+    def _assert_params_width_fixed(self, stage: str) -> None:
+        zone = self.window.params_zone
+        with self.subTest(stage=stage):
+            self.assertEqual(zone.width(), PARAMS_WIDTH)
+            self.assertEqual(zone.minimumWidth(), PARAMS_WIDTH)
+            self.assertEqual(zone.maximumWidth(), PARAMS_WIDTH)
+            self.assertEqual(self._top_splitter().sizes()[0], PARAMS_WIDTH)
+
+    def test_params_panel_width_stays_fixed(self) -> None:
+        """Панель задач не убегает при путях, промпте, resize и загрузке."""
+        self.process_events()
+        self._assert_params_width_fixed("start")
+
+        # Длинный путь без точек разрыва раньше давал minimumSizeHint() ~1200 px.
+        self.window.lbl_source.setText(
+            r"C:\Users\bur_s\OneDrive\Изображения\Архив\2026\Отборка"
+            r"\DSC00103_original_very_long_file_name_for_test.jpg"
+        )
+        self.window.lbl_background.setText(
+            r"C:\My_projects\Photo\data\bg\generated-20261118-012746-from-settings.jpg"
+        )
+        self.process_events()
+        self._assert_params_width_fixed("long paths")
+
+        self.window.prompt.setPlainText(
+            "realistic photo, rocky coast of the Arctic Ocean, seagulls "
+            "circling over the shore, overcast sky"
+        )
+        self.process_events()
+        self._assert_params_width_fixed("prompt")
+
+        self.window.resize(1600, 1000)
+        self.process_events()
+        self._assert_params_width_fixed("resize")
+
+        # Имитация загрузки картинки: превью меняет sizeHint, панель — нет.
+        self.load_current()
+        self.process_events()
+        self._assert_params_width_fixed("image loaded")
+
+        self.window.prompt.clear()
+        self.process_events()
+        self._assert_params_width_fixed("prompt cleared")

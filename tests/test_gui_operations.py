@@ -7,10 +7,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
-from PyQt6.QtGui import QImage
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QImage, QPainter
+from PyQt6.QtWidgets import QDialog, QLabel, QPushButton
 
 from src.core.image import _write
 from src.ui.main_window import DATA_DIR, MainWindow
+from src.ui.settings_dialog import SettingsDialog
 from tests.gui_case import GuiTestCase
 
 IMAGE = Path(__file__).resolve().parents[1] / "data" / "results" / "2026-11-17-park-c" / "source.jpg"
@@ -107,6 +110,38 @@ class TestGuiOperations(GuiTestCase):
         )  # крестик у верхнего края, а не по центру
         self.assertFalse(toast.toolTip())
         self.assertFalse(toast.close_button.toolTip())
+
+    def test_advisory_close_cross_is_centered_in_button(self) -> None:
+        with patch("src.ui.main_window.cut_advisory", return_value=["Внимание"]):
+            self.window._update_source_advisory("photo.jpg")
+        self.process_events()
+        button = self.window.advisory_toast.close_button
+
+        image = QImage(button.width(), button.height(), QImage.Format.Format_ARGB32)
+        image.fill(Qt.GlobalColor.white)
+        painter = QPainter(image)
+        button.render(painter)
+        painter.end()
+
+        # Рамку не трогаем: измеряем только крест внутри квадрата.
+        background = image.pixelColor(9, 2)
+
+        def distance(color) -> int:
+            return (abs(color.red() - background.red())
+                    + abs(color.green() - background.green())
+                    + abs(color.blue() - background.blue()))
+
+        ink = [
+            (x, y)
+            for y in range(3, image.height() - 3)
+            for x in range(3, image.width() - 3)
+            if distance(image.pixelColor(x, y)) > 60
+        ]
+        self.assertTrue(ink)
+        cx = sum(x for x, _ in ink) / len(ink)
+        cy = sum(y for _, y in ink) / len(ink)
+        self.assertLessEqual(abs(cx - (button.width() - 1) / 2), 1)
+        self.assertLessEqual(abs(cy - (button.height() - 1) / 2), 1)
 
     def test_advisory_toast_dismisses_when_leaving_source_tab(self) -> None:
         with patch("src.ui.main_window.cut_advisory", return_value=["Внимание"]):
@@ -286,19 +321,62 @@ class TestGuiOperations(GuiTestCase):
         self.window.stop_operation()
         self.assertIn("останавливать нечего", self.window.log_display.toPlainText())
 
-    def test_generate_success_sets_background(self) -> None:
+    def test_generate_success_sets_background_and_switches_tab(self) -> None:
         background = self._image("generated.jpg")
         with patch("src.ui.main_window.genbg_task", return_value=str(background)):
             self.window.tb_generate.trigger()
             self._finish()
         self.assertEqual(self.window.background_path, background)
         self.assertIsNotNone(self.window.previews["Фон"][0].source_pixmap())
+        self.assertEqual(self.window.tabs.tabText(self.window.tabs.currentIndex()), "Фон")
+
+    def test_generate_task_panel_button_starts(self) -> None:
+        background = self._image("panel.jpg")
+        with patch("src.ui.main_window.genbg_task", return_value=str(background)):
+            self.window.btn_generate.click()
+            self.assertFalse(self.window.btn_generate.isEnabled())
+            self._finish()
+        self.assertTrue(self.window.btn_generate.isEnabled())
+        self.assertEqual(self.window.background_path, background)
 
     def test_generate_without_prompt_does_not_start(self) -> None:
         self.window.prompt.clear()
-        self.window.tb_generate.trigger()
-        self.assertIsNone(self.window._worker)
-        self.assertIn("введите промпт", self.window.log_display.toPlainText())
+        for button in (self.window.tb_generate, self.window.btn_generate):
+            with self.subTest(button=button):
+                if hasattr(button, "trigger"):
+                    button.trigger()
+                else:
+                    button.click()
+                self.assertIsNone(self.window._worker)
+                self.assertIn("введите промпт", self.window.log_display.toPlainText())
+
+    def test_settings_generate_button_applies_and_starts(self) -> None:
+        background = self._image("from-settings.jpg")
+
+        def exec_and_click(dialog):
+            dialog.findChild(QPushButton, "settingsGenerate").click()
+            return QDialog.DialogCode.Accepted
+
+        with patch("src.ui.settings_dialog.SettingsDialog.exec", exec_and_click), \
+             patch("src.ui.main_window.genbg_task", return_value=str(background)):
+            self.window.open_settings()
+            self._finish()
+        self.assertEqual(self.window.background_path, background)
+        self.assertEqual(self.window.tabs.tabText(self.window.tabs.currentIndex()), "Фон")
+
+    def test_settings_show_provider_model_and_key_status(self) -> None:
+        dialog = SettingsDialog(self.window)
+        info = dialog.findChild(QLabel, "providerInfo")
+        self.assertIn("Сейчас:", info.text())
+        with patch("src.core.backgrounds.cf_creds", return_value=("account", "token")):
+            dialog._update_provider_info()
+        self.assertIn("Cloudflare", info.text())
+        self.assertIn("flux-1-schnell", info.text())
+        self.assertIn("ключ найден", info.text())
+        combo = dialog.controls["bg/provider_api"]
+        combo.setCurrentText("pollinations")
+        self.assertIn("Pollinations", info.text())
+        self.assertIn("ключ не нужен", info.text())
 
     def test_upscale_requires_background(self) -> None:
         self.window.tb_upscale.trigger()

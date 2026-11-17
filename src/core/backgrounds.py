@@ -28,6 +28,7 @@ from src.core.settings import (
     HF_TOKEN_TXT,
     STABILITY_KEY_TXT,
 )
+from src.core.sizes import size_for
 from src.core.upscale import upscale
 
 
@@ -248,13 +249,13 @@ def _google_image_b64(data):
     raise RuntimeError("Google вернул ответ без изображения")
 
 
-def genbg_google(prompt, out, width=1632, height=1224, model=None, key=None):
+def genbg_google(prompt, out, width=1632, height=1224, model=None, key=None, image_size=None):
     key = key or google_key()
     if not key:
         raise RuntimeError("нет ключа Google AI Studio: задайте GOOGLE_API_KEY или файл "
                            f"{GOOGLE_KEY_TXT}")
     model = _google_image_model(model)
-    size = os.environ.get("PHOTO_GOOGLE_SIZE", "1K")
+    size = image_size or os.environ.get("PHOTO_GOOGLE_SIZE", "1K")
     payload = {
         "model": model,
         "input": [{"type": "text", "text": prompt}],
@@ -309,8 +310,32 @@ def _pollinations(prompt, out, width, height, seed, retries, cancelled=None):
     raise RuntimeError("лимит или сеть недоступны")
 
 
+def _fit_size(out, width, height, progress=None, cancelled=None):
+    """Привести файл к точному размеру пресета: ESRGAN ×4, затем ресайз."""
+    img = cv2.imread(str(out))
+    if img is None:
+        return
+    h, w = img.shape[:2]
+    if (w, h) == (width, height):
+        return
+    check_cancel(cancelled)
+    if (w < width or h < height) and ESR_MODEL.exists():
+        maybe_report(progress, 65, "Апскейл до нужного размера")
+        upscale(out, out, progress=scaled(progress, 60, 90), cancelled=cancelled)
+        img = cv2.imread(str(out))
+        if img is None:
+            return
+        h, w = img.shape[:2]
+    if (w, h) != (width, height):
+        check_cancel(cancelled)
+        maybe_report(progress, 92, f"Размер {width}×{height}")
+        interp = cv2.INTER_AREA if width < w else cv2.INTER_CUBIC
+        img = cv2.resize(img, (width, height), interpolation=interp)
+        _write(out, img)
+
+
 def genbg(prompt, out, width=886, height=664, seed=7, retries=5, do_upscale=True,
-          provider="auto", model=None, progress=None, cancelled=None):
+          provider="auto", model=None, progress=None, cancelled=None, size=None):
     order = {
         "auto": ["google", "cloudflare", "stability", "huggingface", "pollinations"],
         "google": ["google"],
@@ -320,6 +345,9 @@ def genbg(prompt, out, width=886, height=664, seed=7, retries=5, do_upscale=True
         "pollinations": ["pollinations"],
     }.get(provider, ["pollinations"])
 
+    target = size_for(size)
+    crop_w, crop_h = target if target else (1632, 1224)
+    gen_w, gen_h = target if target else (width, height)
     errors = []
     maybe_report(progress, 0, f"Провайдеров в очереди: {len(order)}")
     for p in order:
@@ -327,20 +355,21 @@ def genbg(prompt, out, width=886, height=664, seed=7, retries=5, do_upscale=True
         maybe_report(progress, len(errors) * 60 // len(order), f"Провайдер: {p}")
         try:
             if p == "google":
-                genbg_google(prompt, out, 1632, 1224, model=model)
+                genbg_google(prompt, out, crop_w, crop_h, model=model, image_size=size)
             elif p == "cloudflare":
-                genbg_cloudflare(prompt, out, 1632, 1224, model=model or "@cf/black-forest-labs/flux-1-schnell")
+                genbg_cloudflare(prompt, out, crop_w, crop_h, model=model or "@cf/black-forest-labs/flux-1-schnell")
             elif p == "stability":
-                genbg_stability(prompt, out, 1632, 1224, model=model)
+                genbg_stability(prompt, out, crop_w, crop_h, model=model)
             elif p == "huggingface":
-                genbg_hf(prompt, out, 1632, 1224, model=model or "black-forest-labs/FLUX.1-schnell")
+                genbg_hf(prompt, out, crop_w, crop_h, model=model or "black-forest-labs/FLUX.1-schnell")
             else:
-                _pollinations(prompt, out, width, height, seed, retries, cancelled=cancelled)
-            if do_upscale and ESR_MODEL.exists():
+                _pollinations(prompt, out, gen_w, gen_h, seed, retries, cancelled=cancelled)
+            if target:
+                _fit_size(out, *target, progress=progress, cancelled=cancelled)
+            elif do_upscale and ESR_MODEL.exists():
                 check_cancel(cancelled)
                 upscale(out, out, progress=scaled(progress, 60, 100), cancelled=cancelled)
-            else:
-                maybe_report(progress, 100, "Фон готов")
+            maybe_report(progress, 100, "Фон готов")
             return
         except CancelledError:
             raise

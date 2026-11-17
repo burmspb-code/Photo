@@ -18,20 +18,12 @@ BG_DIR = DATA_DIR / "bg"
 WORK_DIR = DATA_DIR / "work"
 CUTOUT_FILE = WORK_DIR / "cutout.png"
 RESULT_FILE = WORK_DIR / "result.jpg"
-PROMPT_BASE = "realistic photo, no people, no text"
 
 
 def _path(value, default) -> str:
     path = Path(value) if value else Path(default)
     path.parent.mkdir(parents=True, exist_ok=True)
     return str(path)
-
-
-def _prompt(value) -> str:
-    text = str(value or "").strip()
-    if PROMPT_BASE.lower() not in text.lower():
-        text = f"{text}, {PROMPT_BASE}" if text else PROMPT_BASE
-    return text
 
 
 def cut_task(source, out=None, *, options=None, progress=None, cancelled=None) -> str:
@@ -63,18 +55,31 @@ def cut_task(source, out=None, *, options=None, progress=None, cancelled=None) -
 def genbg_task(prompt, out=None, *, options=None, progress=None, cancelled=None) -> str:
     """Сгенерировать фон в ``data\\bg\\`` и при необходимости апскейлить."""
     from .backgrounds import genbg
+    from .prompt import has_cyrillic, prepare_prompt
 
     params = options or {}
+    raw = str(prompt or "").strip()
+    if has_cyrillic(raw):
+        maybe_report(progress, 0, "Перевод промпта на английский…")
+    text = prepare_prompt(raw)
+    if has_cyrillic(raw):
+        message = (
+            "Перевод недоступен — промпт отправлен как есть"
+            if has_cyrillic(text) else f"Переведено: {text[:120]}"
+        )
+        maybe_report(progress, 1, message)
+    size = str(params.get("size") or "1K")
     default_out = BG_DIR / f"generated-{time.strftime('%Y%m%d-%H%M%S')}.jpg"
     dest = _path(out, default_out)
     maybe_report(progress, 0, "Генерация фона: старт")
     genbg(
-        _prompt(prompt),
+        text,
         dest,
         seed=int(params.get("seed", 7)),
         do_upscale=bool(params.get("do_upscale", False)),
         provider=str(params.get("provider", "cloudflare")),
         model=params.get("model"),
+        size=size,
         progress=scaled(progress, 5, 100),
         cancelled=cancelled,
     )

@@ -45,6 +45,10 @@ _DARK = {
     "overlay_border": "#475569",
     "overlay_text": "#cbd5e1",
     "warning": "#f59e0b",
+    "zoom_bg": "rgba(30, 41, 59, 170)",
+    "zoom_text": "rgba(203, 213, 225, 200)",
+    "zoom_groove": "rgba(148, 163, 184, 110)",
+    "zoom_handle": "#94a3b8",
 }
 
 _LIGHT = {
@@ -90,6 +94,10 @@ _LIGHT = {
     "overlay_border": "#cbd5e1",
     "overlay_text": "#334155",
     "warning": "#b45309",
+    "zoom_bg": "rgba(255, 255, 255, 205)",
+    "zoom_text": "rgba(71, 85, 105, 210)",
+    "zoom_groove": "rgba(100, 116, 139, 90)",
+    "zoom_handle": "#64748b",
 }
 
 _STYLE = Template(
@@ -127,13 +135,29 @@ QFrame#previewArea {
     border: 0;
 }
 QFrame#zoomBar {
-    background: $overlay_bg;
-    border: 1px solid $overlay_border;
-    border-radius: 6px;
-    color: $overlay_text;
+    background: $zoom_bg;
+    border: 0;
+    border-radius: 10px;
 }
-QFrame#zoomBar QLabel {
-    color: $overlay_text;
+QLabel#zoomLabel {
+    color: $zoom_text;
+    font-size: 10px;
+    background: transparent;
+}
+QSlider#zoomSlider {
+    background: transparent;
+}
+QSlider#zoomSlider::groove:vertical {
+    background: $zoom_groove;
+    width: 2px;
+    border-radius: 1px;
+}
+QSlider#zoomSlider::handle:vertical {
+    background: $zoom_handle;
+    width: 10px;
+    height: 10px;
+    margin: 0 -4px;
+    border-radius: 5px;
 }
 QFrame#advisoryToast {
     background: $overlay_bg;
@@ -151,8 +175,6 @@ QPushButton#advisoryClose {
     border-radius: 4px;
     padding: 0;
     color: $warning;
-    font-size: 15px;
-    font-weight: bold;
 }
 QScrollArea {
     background: $zone_bg;

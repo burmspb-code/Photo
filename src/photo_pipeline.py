@@ -6,6 +6,7 @@ Commands:
   hair      <source> <out.jpg|png> [--color rusy] [--strength 0.85]
   analyze   <source>
   genbg     <prompt> <out.jpg> [--width 886] [--height 664] [--seed 7] [--no-upscale]
+            [--size 1K|2K|4K]
             [--provider auto|google|cloudflare|stability|huggingface|pollinations] [--model ...]
   upscale   <source> <out.jpg|png>
 """
@@ -21,6 +22,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from src.core.backgrounds import _aspect, _crop_aspect, genbg  # noqa: E402, F401 — обратная совместимость
+from src.core.prompt import prepare_prompt  # noqa: E402 — перевод и обязательная фраза
 from src.core.compose import _cover, composite  # noqa: E402, F401 — обратная совместимость
 from src.core.cutout import make_cutout, recolor_hair  # noqa: E402
 from src.core.image import _blur, _levels, _read, _write, analyze  # noqa: E402, F401 — обратная совместимость
@@ -66,9 +68,10 @@ def main(argv):
     elif cmd == "analyze":
         analyze(pos[0])
     elif cmd == "genbg":
-        genbg(pos[0], pos[1], int(opts.get("width", 886)), int(opts.get("height", 664)),
+        genbg(prepare_prompt(pos[0]), pos[1], int(opts.get("width", 886)), int(opts.get("height", 664)),
               int(opts.get("seed", 7)), do_upscale=opts.get("no-upscale") != "true",
-              provider=opts.get("provider", "auto"), model=opts.get("model"))
+              provider=opts.get("provider", "auto"), model=opts.get("model"),
+              size=opts.get("size"))
     elif cmd == "upscale":
         upscale(pos[0], pos[1])
     else:

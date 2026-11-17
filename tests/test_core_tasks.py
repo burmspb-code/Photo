@@ -50,20 +50,44 @@ class TestTasks(unittest.TestCase):
         self.assertTrue(any(message == "половина" for _p, message in progress))
 
     def test_genbg_task_adds_required_prompt_and_options(self) -> None:
-        with patch("src.core.backgrounds.genbg") as genbg:
+        with patch("src.core.prompt.translate_to_english", return_value="park"), \
+             patch("src.core.backgrounds.genbg") as genbg:
             out = self.dir / "bg.jpg"
             result = tasks.genbg_task(
-                "парк", out,
-                options={"provider": "cloudflare", "seed": 3, "do_upscale": True},
+                "парк в 2К", out,
+                options={"provider": "cloudflare", "seed": 3, "size": "2K"},
             )
 
         self.assertEqual(result, str(out))
         args, kwargs = genbg.call_args
-        self.assertEqual(args[0], "парк, realistic photo, no people, no text")
+        self.assertEqual(args[0], "park, realistic photo, no people, no text")
         self.assertEqual(args[1], str(out))
         self.assertEqual(kwargs["provider"], "cloudflare")
         self.assertEqual(kwargs["seed"], 3)
-        self.assertTrue(kwargs["do_upscale"])
+        self.assertEqual(kwargs["size"], "2K")
+
+    def test_genbg_task_translates_russian_and_reports_it(self) -> None:
+        progress = []
+        with patch("src.core.prompt.translate_to_english", return_value="rocky arctic shore"), \
+             patch("src.core.backgrounds.genbg") as genbg:
+            tasks.genbg_task(
+                "Скалистый берег Северного ледовитого океана", self.dir / "bg.jpg",
+                progress=lambda p, m: progress.append((p, m)),
+            )
+
+        self.assertEqual(genbg.call_args.args[0],
+                         "rocky arctic shore, realistic photo, no people, no text")
+        self.assertTrue(any("Перевод" in message for _p, message in progress))
+
+    def test_genbg_task_warns_when_translation_fails(self) -> None:
+        progress = []
+        with patch("src.core.prompt.translate_to_english", side_effect=lambda t: t), \
+             patch("src.core.backgrounds.genbg"):
+            tasks.genbg_task(
+                "скалистый берег", self.dir / "bg.jpg",
+                progress=lambda p, m: progress.append((p, m)),
+            )
+        self.assertTrue(any("Перевод недоступен" in message for _p, message in progress))
 
     def test_genbg_task_keeps_compliant_prompt(self) -> None:
         prompt = "realistic photo, no people, no text, soft light"

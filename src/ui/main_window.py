@@ -21,6 +21,7 @@ from pathlib import Path
 from PyQt6.QtCore import (
     Qt,
     QEvent,
+    QLineF,
     QPoint,
     QPropertyAnimation,
     QRect,
@@ -39,6 +40,8 @@ from PyQt6.QtGui import (
     QImage,
     QPainter,
     QPainterPath,
+    QPalette,
+    QPen,
     QPixmap,
     QRegion,
 )
@@ -93,6 +96,9 @@ SAVE_PRESETS = {
     "Результат": ("result.jpg", "JPEG images (*.jpg *.jpeg);;PNG images (*.png)"),
     "До — После": ("before-after.jpg", "JPEG images (*.jpg *.jpeg);;PNG images (*.png)"),
 }
+# Кратность к вписанному кадру: 2^(value/100), поэтому -100 → ÷2, +200 → ×4.
+ZOOM_MIN, ZOOM_MAX = -100, 200
+ZOOM_LABELS = ((200, "×4"), (100, "×2"), (0, "×1"), (-100, "÷2"))
 CUT_MODELS = (
     "birefnet-general",
     "birefnet-portrait",
@@ -104,6 +110,10 @@ CUT_MODELS = (
     "u2netp",
 )
 IMAGE_FILTER = "Images (*.jpg *.jpeg *.png *.bmp *.webp)"
+# Панель задач фиксированной ширины: QSplitter.setSizes() задаёт только стартовые
+# пропорции, поэтому при пересчёте лэйаута (загрузка фото, генерация, resize)
+# левая панель «убегала». Жёсткий pre/min/max в setFixedWidth этого не допускает.
+PARAMS_WIDTH = 340
 
 # Нативная обработка краёв безрамочного окна в Windows.
 WM_NCHITTEST = 0x0084
@@ -367,11 +377,38 @@ class HoverOverlay(QFrame):
 
 
 class ZoomOverlay(HoverOverlay):
-    """Вертикальная шкала 0–100% с подписями."""
+    """Вертикальная шкала кратности увеличения: ×4 … ×1 … ÷2."""
 
     def __init__(self):
         super().__init__("zoomBar")
-        self.setToolTip("Ползунок или колесо мыши — масштаб")
+        self.setToolTip("Ползунок или колесо мыши — кратность увеличения")
+
+
+class CloseButton(QPushButton):
+    """Квадратная кнопка с геометрически точным крестиком по центру.
+
+    Шрифтовый глиф «×» сидит в кегле со смещением, поэтому крест рисуется
+    линиями относительно центра виджета — он остаётся симметричным в любой
+    теме и при любом масштабе текста.
+    """
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)  # фон, рамка и состояние hover из QSS
+        rect = self.rect()
+        # QRect::center() у чётного размера округляет вверх-влево (10,10 вместо
+        # 10.5,10.5) — из-за этого крест кажется смещённым внутри квадрата.
+        cx = (rect.left() + rect.right()) / 2
+        cy = (rect.top() + rect.bottom()) / 2
+        half = min(rect.width(), rect.height()) / 2 - 5
+        pen = QPen(self.palette().color(QPalette.ColorRole.ButtonText))
+        pen.setWidthF(1.6)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(pen)
+        painter.drawLine(QLineF(cx - half, cy - half, cx + half, cy + half))
+        painter.drawLine(QLineF(cx + half, cy - half, cx - half, cy + half))
+        painter.end()
 
 
 class AdvisoryToast(HoverOverlay):
@@ -387,8 +424,9 @@ class AdvisoryToast(HoverOverlay):
         self.label.setObjectName("advisoryText")
         self.label.setWordWrap(True)
         layout.addWidget(self.label, 1)
-        self.close_button = QPushButton("×")
+        self.close_button = CloseButton()
         self.close_button.setObjectName("advisoryClose")
+        self.close_button.setAccessibleName("Закрыть")
         self.close_button.setFixedSize(22, 22)
         self.close_button.clicked.connect(self.dismiss)
         layout.addWidget(self.close_button, 0, Qt.AlignmentFlag.AlignTop)
@@ -575,13 +613,14 @@ class MainWindow(QMainWindow):
         self._create_toolbar()
 
         self.params_zone = self._build_params_zone()
+        self.params_zone.setFixedWidth(PARAMS_WIDTH)
         self.preview_area = self._build_preview_zone()
         top_splitter = QSplitter(Qt.Orientation.Horizontal)
         top_splitter.addWidget(self.params_zone)
         top_splitter.addWidget(self.preview_area)
         top_splitter.setStretchFactor(0, 0)
         top_splitter.setStretchFactor(1, 1)
-        top_splitter.setSizes([340, 900])
+        top_splitter.setSizes([PARAMS_WIDTH, 900])
 
         self.log_zone = self._build_log_zone()
         main_splitter = QSplitter(Qt.Orientation.Vertical)
@@ -812,6 +851,8 @@ class MainWindow(QMainWindow):
         self.prompt = QPlainTextEdit()
         self.prompt.setFixedHeight(64)
         box.addWidget(self.prompt)
+        self.btn_generate = QPushButton("Сгенерировать фон")
+        box.addWidget(self.btn_generate)
         form.addWidget(background)
 
         cut = QGroupBox("Вырезка")
@@ -885,26 +926,28 @@ class MainWindow(QMainWindow):
         self.btn_save_current.setEnabled(False)
         self.tabs.setCornerWidget(self.btn_save_current, Qt.Corner.TopRightCorner)
 
-        # Вертикальная шкала 0–100% с цифрами в правом верхнем углу изображения.
+        # Вертикальная шкала кратности в правом верхнем углу изображения.
         zoom_overlay = ZoomOverlay()
         zoom_layout = QHBoxLayout(zoom_overlay)
-        zoom_layout.setContentsMargins(6, 6, 6, 6)
+        zoom_layout.setContentsMargins(4, 6, 4, 6)
         zoom_layout.setSpacing(2)
         labels = QVBoxLayout()
         labels.setSpacing(0)
-        for value in (100, 50, 0, -50, -100):
-            label = QLabel(str(value))
+        for value, text in ZOOM_LABELS:
+            label = QLabel(text)
+            label.setObjectName("zoomLabel")
             label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            label.setFixedWidth(30)
+            label.setFixedWidth(24)
             labels.addWidget(label)
-            if value != -100:
+            if value != ZOOM_MIN:
                 labels.addStretch()
         zoom_layout.addLayout(labels)
         self.zoom_slider = QSlider(Qt.Orientation.Vertical)
-        self.zoom_slider.setRange(-100, 100)  # 0 = исходный масштаб (вписать)
+        self.zoom_slider.setObjectName("zoomSlider")
+        self.zoom_slider.setRange(ZOOM_MIN, ZOOM_MAX)  # -100 → ÷2, 0 → ×1, +200 → ×4
         self.zoom_slider.setValue(0)
         self.zoom_slider.setSingleStep(5)
-        self.zoom_slider.setFixedHeight(140)
+        self.zoom_slider.setFixedHeight(120)  # та же высота, что у области подписей: метки совпадают с ручкой
         zoom_layout.addWidget(self.zoom_slider)
 
         # Всплывающее предупреждение о качестве вырезки — не занимает место в слое.
@@ -957,6 +1000,10 @@ class MainWindow(QMainWindow):
         label = QLabel(text)
         label.setObjectName("pathLabel")
         label.setWordWrap(True)
+        # Путь Windows не содержит точек разрыва — minimumSizeHint() становится
+        # равным всей строке (до 1200 px) и давит на splitter. Забираем размер
+        # подсказку у политики: метка переносится внутри отведённой ширины.
+        label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         return label
 
@@ -1007,7 +1054,7 @@ class MainWindow(QMainWindow):
         self.preview_area_controls.wheel_stepped.connect(zoom_overlay.reveal)
         self.preview_area_controls.wheel_stepped.connect(
             lambda steps: self.zoom_slider.setValue(
-                max(-100, min(100, self.zoom_slider.value() + steps * 5))
+                max(ZOOM_MIN, min(ZOOM_MAX, self.zoom_slider.value() + steps * 5))
             )
         )
         self.btn_fit_view.clicked.connect(lambda: self.zoom_slider.setValue(0))
@@ -1028,6 +1075,7 @@ class MainWindow(QMainWindow):
         self.tb_open_background.triggered.connect(self.open_background)
         self.tb_cut.triggered.connect(self.run_cut)
         self.tb_generate.triggered.connect(self.run_generate)
+        self.btn_generate.clicked.connect(self.run_generate)
         self.tb_upscale.triggered.connect(self.run_upscale)
         self.tb_compose.triggered.connect(self.run_compose)
         self.tb_stop.triggered.connect(self.stop_operation)
@@ -1109,8 +1157,10 @@ class MainWindow(QMainWindow):
     def open_settings(self) -> None:
         dialog = SettingsDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._load_settings()
+            self._load_settings()  # промпт из диалога должен попасть в current_params()
             self._log("OK", "Настройки сохранены.")
+            if dialog.generate_requested:
+                self.run_generate()
 
     def save_result(self) -> None:
         preview = self.previews["Результат"][0]
@@ -1197,7 +1247,7 @@ class MainWindow(QMainWindow):
             self.preview_area_controls.zoom_overlay.reveal()
 
     def _set_zoom_percent(self, value: int) -> None:
-        """0 — исходный масштаб (вписать), −100 / +100 — вдвое меньше/больше."""
+        """Кратность к вписанному кадру: −100 → ÷2, 0 → ×1, +200 → ×4."""
         if not self._has_current_image():
             return
         for preview in self.previews.get(self.tabs.tabText(self.tabs.currentIndex()), ()):
@@ -1220,7 +1270,7 @@ class MainWindow(QMainWindow):
             factor = preview.fit_factor()
             value = round(math.log2(zoom / factor) * 100) if factor > 0 and zoom > 0 else 0
         blocker = QSignalBlocker(self.zoom_slider)
-        self.zoom_slider.setValue(max(-100, min(100, value)))
+        self.zoom_slider.setValue(max(ZOOM_MIN, min(ZOOM_MAX, value)))
         blocker.unblock()
 
     def _apply_theme(self, name: str) -> None:
@@ -1277,7 +1327,7 @@ class MainWindow(QMainWindow):
             options={
                 "provider": params["provider"],
                 "seed": params["bg_seed"],
-                "do_upscale": params["do_upscale"],
+                "size": params["bg_size"],
             },
         )
 
@@ -1332,7 +1382,8 @@ class MainWindow(QMainWindow):
     def _set_busy(self, busy: bool) -> None:
         for widget in (
             self.tb_cut, self.tb_generate, self.tb_upscale, self.tb_compose,
-            self.tb_save, self.act_save_result, self.btn_cut, self.btn_compose,
+            self.tb_save, self.act_save_result, self.btn_cut, self.btn_generate,
+            self.btn_compose,
         ):
             widget.setEnabled(not busy)
         self._busy = busy
@@ -1362,6 +1413,7 @@ class MainWindow(QMainWindow):
             self._activate_tab("Вырезка")
         elif name in ("Генерация фона", "Апскейл"):
             self._set_background(path, quiet=True)
+            self._activate_tab("Фон")
         elif name == "Сборка композита":
             self._show_preview("Результат", path)
             self._show_preview("До — После", path, 1)
@@ -1476,7 +1528,7 @@ class MainWindow(QMainWindow):
             "background": str(self.background_path) if self.background_path else None,
             "provider": str(self.settings.value("bg/provider_api", APP_DEFAULTS["bg/provider_api"])),
             "bg_seed": self._setting_number("bg/seed", APP_DEFAULTS["bg/seed"], int),
-            "do_upscale": bool(self.settings.value("bg/upscale", APP_DEFAULTS["bg/upscale"], type=bool)),
+            "bg_size": str(self.settings.value("bg/size", APP_DEFAULTS["bg/size"])),
             "cut_tile": self._setting_number("cut/tile", APP_DEFAULTS["cut/tile"], int),
             "cut_sigma": self._setting_number("cut/sigma", APP_DEFAULTS["cut/sigma"], float),
             "cut_head_ratio": self._setting_number("cut/head_ratio", APP_DEFAULTS["cut/head_ratio"], float),

@@ -6,7 +6,7 @@
 """
 from __future__ import annotations
 
-from PyQt6.QtCore import QSettings
+from PyQt6.QtCore import QSettings, Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -18,11 +18,14 @@ from PyQt6.QtWidgets import (
     QLabel,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
+
+from src.core.sizes import SIZE_ORDER
 
 from .defaults import APP_DEFAULTS
 
@@ -38,6 +41,15 @@ CUT_MODELS = (
 )
 PROVIDERS = ("cloudflare", "google", "stability", "huggingface", "pollinations")
 
+# Модели по умолчанию совпадают с вызовами в src.core.backgrounds.genbg().
+PROVIDER_INFO = {
+    "cloudflare": ("Cloudflare", "@cf/black-forest-labs/flux-1-schnell"),
+    "google": ("Google", "gemini-nano-banana-2.1"),
+    "stability": ("Stability AI", "sd3.5-large"),
+    "huggingface": ("Hugging Face", "black-forest-labs/FLUX.1-schnell"),
+    "pollinations": ("Pollinations", "image.pollinations.ai"),
+}
+
 
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
@@ -45,6 +57,7 @@ class SettingsDialog(QDialog):
         self.settings = QSettings("Photo", "Photo")
         self.controls: dict[str, QWidget] = {}
         self.defaults: dict[str, object] = {}
+        self.generate_requested = False  # кнопка «Сгенерировать» в диалоге
 
         self.setWindowTitle("Настройки")
         self.resize(760, 600)
@@ -66,6 +79,8 @@ class SettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+        # Подключаем после создания всех вкладок: слот обновляет обе метки.
+        self.controls["bg/provider_api"].currentTextChanged.connect(self._update_provider_info)
         self._load()
 
     def _add(self, form: QFormLayout, key: str, label: str, widget: QWidget, default) -> QWidget:
@@ -97,6 +112,31 @@ class SettingsDialog(QDialog):
         spin.setDecimals(decimals)
         return spin
 
+    def _update_provider_info(self) -> None:
+        """Показать текущего провайдера, его модель и наличие ключа."""
+        provider = str(self.controls["bg/provider_api"].currentText())
+        title, model = PROVIDER_INFO.get(provider, (provider, "—"))
+        # Тяжёлый модуль ядра импортируем только при открытии настроек.
+        from src.core.backgrounds import cf_creds, google_key, hf_token, stability_key
+
+        checks = {
+            "cloudflare": lambda: all(cf_creds()),
+            "google": lambda: bool(google_key()),
+            "stability": lambda: bool(stability_key()),
+            "huggingface": lambda: bool(hf_token()),
+        }
+        if provider in checks:
+            status = "ключ найден" if checks[provider]() else "ключ не найден"
+        else:
+            status = "ключ не нужен"
+        self.provider_info.setText(f"Сейчас: {title} · {model}\n{status}")
+        self.background_model.setText(f"{title} · {model}")
+
+    def _generate(self) -> None:
+        """Сохранить настройки и закрыться: MainWindow запустит генерацию."""
+        self.generate_requested = True
+        self._save()
+
     def _models_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -112,10 +152,16 @@ class SettingsDialog(QDialog):
 
         cloud = QGroupBox("Фон (провайдер API)")
         form = QFormLayout(cloud)
-        self._add(form, "bg/provider_api", "Провайдер по умолчанию", self._combo(PROVIDERS), "cloudflare")
+        self._add(
+            form, "bg/provider_api", "Провайдер по умолчанию", self._combo(PROVIDERS), "cloudflare"
+        )
+        self.provider_info = QLabel()
+        self.provider_info.setObjectName("providerInfo")
+        self.provider_info.setWordWrap(True)
+        form.addRow("Подключено:", self.provider_info)
         info = QLabel(
-            "Модель фона задаётся в настройках провайдера. Ключи хранятся вне репозитория "
-            "в %LOCALAPPDATA%\\rembg-env\\ — здесь показывается только их наличие."
+            "Ключи хранятся вне репозитория в %LOCALAPPDATA%\\rembg-env\\ — здесь показывается "
+            "только их наличие. Модель задаётся в коде провайдера (или env PHOTO_GOOGLE_MODEL)."
         )
         info.setWordWrap(True)
         form.addRow(info)
@@ -150,11 +196,23 @@ class SettingsDialog(QDialog):
             form, "bg/prompt", "Промпт", prompt,
             "realistic photo, no people, no text, soft overcast light",
         )
-        self._add(form, "bg/model", "Модель провайдера", QLabel("@cf/black-forest-labs/flux-1-schnell"), "")
+        generate = QPushButton("Сгенерировать фон")
+        generate.setObjectName("settingsGenerate")
+        generate.setToolTip("Применить настройки и сразу сгенерировать фон")
+        generate.clicked.connect(self._generate)
+        form.addRow("", generate)
+        self.background_model = QLabel()
+        self.background_model.setObjectName("backgroundModel")
+        # QFormLayout растягивает QLabel по высоте строки и центрирует текст —
+        # из-за этого значение «Модели» уезжало вниз. Фиксируем высоту и верхнее
+        # выравнивание, чтобы подпись и значение были на одной строке.
+        self.background_model.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.background_model.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        form.addRow("Модель:", self.background_model)
         self._add(form, "bg/drafts", "Число черновиков", self._spin(1, 12), 3)
         self._add(form, "bg/aspect", "Соотношение сторон", self._combo(["4:3", "3:2", "1:1", "16:9"]), "4:3")
         self._add(form, "bg/seed", "Seed", self._spin(0, 999999), 7)
-        self._add(form, "bg/upscale", "Апскейл после генерации", QCheckBox(), False)
+        self._add(form, "bg/size", "Размер фона", self._combo(SIZE_ORDER), "2K")
         return page
 
     def _compose_tab(self) -> QWidget:
@@ -213,6 +271,7 @@ class SettingsDialog(QDialog):
                 widget.setText(str(self.settings.value(key, default)))
             else:
                 widget.setText(str(self.settings.value(key, default)))
+        self._update_provider_info()
 
     def _save(self) -> None:
         for key, widget in self.controls.items():
