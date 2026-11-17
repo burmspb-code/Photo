@@ -1,12 +1,12 @@
-"""Скелет главного окна приложения замены фона.
+"""Главное окно приложения замены фона.
 
 Три зоны:
     1. меню + тулбар;
     2. результат: параметры задачи слева, предпросмотр с вкладками справа;
     3. служебные сообщения: прогресс, кнопка «Стоп», лог.
 
-Тяжёлые операции (вырезка, генерация, апскейл, композит) пока заглушены.
-Открытие файлов, предпросмотр и сохранение кадра работают по-настоящему.
+Вырезка, генерация фона, апскейл и сборка композита выполняются в
+``CoreWorker`` (QThread) с прогрессом и отменой; логика — в ``src.core``.
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from pathlib import Path
 from PyQt6.QtCore import (
     Qt,
     QEvent,
+    QLineF,
     QPoint,
     QPropertyAnimation,
     QRect,
@@ -39,6 +40,8 @@ from PyQt6.QtGui import (
     QImage,
     QPainter,
     QPainterPath,
+    QPalette,
+    QPen,
     QPixmap,
     QRegion,
 )
@@ -70,8 +73,13 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from src.core.cutout import cut_advisory
+from src.core.tasks import CUTOUT_FILE, compose_task, cut_task, genbg_task, upscale_task
+
+from .defaults import APP_DEFAULTS
 from .settings_dialog import SettingsDialog
 from .styles import THEMES
+from .workers import CoreWorker
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT / "data"
@@ -80,6 +88,17 @@ BG_DIR = DATA_DIR / "bg"
 LOG = logging.getLogger(__name__)
 
 PREVIEW_TABS = ("Исходник", "Вырезка", "Фон", "Результат", "До — После")
+# Сохранять можно только промежуточные результаты; исходное фото не сохраняем.
+SAVE_TABS = ("Вырезка", "Фон", "Результат", "До — После")
+SAVE_PRESETS = {
+    "Вырезка": ("cutout.png", "PNG images (*.png);;JPEG images (*.jpg *.jpeg)"),
+    "Фон": ("background.jpg", "JPEG images (*.jpg *.jpeg);;PNG images (*.png)"),
+    "Результат": ("result.jpg", "JPEG images (*.jpg *.jpeg);;PNG images (*.png)"),
+    "До — После": ("before-after.jpg", "JPEG images (*.jpg *.jpeg);;PNG images (*.png)"),
+}
+# Кратность к вписанному кадру: 2^(value/100), поэтому -100 → ÷2, +200 → ×4.
+ZOOM_MIN, ZOOM_MAX = -100, 200
+ZOOM_LABELS = ((200, "×4"), (100, "×2"), (0, "×1"), (-100, "÷2"))
 CUT_MODELS = (
     "birefnet-general",
     "birefnet-portrait",
@@ -91,6 +110,10 @@ CUT_MODELS = (
     "u2netp",
 )
 IMAGE_FILTER = "Images (*.jpg *.jpeg *.png *.bmp *.webp)"
+# Панель задач фиксированной ширины: QSplitter.setSizes() задаёт только стартовые
+# пропорции, поэтому при пересчёте лэйаута (загрузка фото, генерация, resize)
+# левая панель «убегала». Жёсткий pre/min/max в setFixedWidth этого не допускает.
+PARAMS_WIDTH = 340
 
 # Нативная обработка краёв безрамочного окна в Windows.
 WM_NCHITTEST = 0x0084
@@ -354,42 +377,94 @@ class HoverOverlay(QFrame):
 
 
 class ZoomOverlay(HoverOverlay):
-    """Вертикальная шкала 0–100% с подписями."""
+    """Вертикальная шкала кратности увеличения: ×4 … ×1 … ÷2."""
 
     def __init__(self):
         super().__init__("zoomBar")
-        self.setToolTip("Ползунок или колесо мыши — масштаб")
+        self.setToolTip("Ползунок или колесо мыши — кратность увеличения")
 
 
-class NavOverlay(HoverOverlay):
-    hover_stepped = pyqtSignal(int)
+class CloseButton(QPushButton):
+    """Квадратная кнопка с геометрически точным крестиком по центру.
+
+    Шрифтовый глиф «×» сидит в кегле со смещением, поэтому крест рисуется
+    линиями относительно центра виджета — он остаётся симметричным в любой
+    теме и при любом масштабе текста.
+    """
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)  # фон, рамка и состояние hover из QSS
+        rect = self.rect()
+        # QRect::center() у чётного размера округляет вверх-влево (10,10 вместо
+        # 10.5,10.5) — из-за этого крест кажется смещённым внутри квадрата.
+        cx = (rect.left() + rect.right()) / 2
+        cy = (rect.top() + rect.bottom()) / 2
+        half = min(rect.width(), rect.height()) / 2 - 5
+        pen = QPen(self.palette().color(QPalette.ColorRole.ButtonText))
+        pen.setWidthF(1.6)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(pen)
+        painter.drawLine(QLineF(cx - half, cy - half, cx + half, cy + half))
+        painter.drawLine(QLineF(cx + half, cy - half, cx - half, cy + half))
+        painter.end()
+
+
+class AdvisoryToast(HoverOverlay):
+    """Всплывающее предупреждение: живёт 5 с, закрывается крестиком."""
 
     def __init__(self):
-        super().__init__("navBar")
-        self._region = 0
-        self.setToolTip("Боковые кнопки мыши или наведение на стрелку — смена кадра")
+        super().__init__("advisoryToast")
+        self.setMaximumWidth(420)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 8, 6, 8)
+        layout.setSpacing(8)
+        self.label = QLabel()
+        self.label.setObjectName("advisoryText")
+        self.label.setWordWrap(True)
+        layout.addWidget(self.label, 1)
+        self.close_button = CloseButton()
+        self.close_button.setObjectName("advisoryClose")
+        self.close_button.setAccessibleName("Закрыть")
+        self.close_button.setFixedSize(22, 22)
+        self.close_button.clicked.connect(self.dismiss)
+        layout.addWidget(self.close_button, 0, Qt.AlignmentFlag.AlignTop)
+        self._fade.finished.connect(self._on_fade_finished)
+        self.hide()
 
-    def enterEvent(self, event) -> None:
-        super().enterEvent(event)
-        self._region = -1 if event.position().x() < self.width() / 2 else 1
-        self.hover_stepped.emit(self._region)
+    def show_notes(self, notes: list[str]) -> None:
+        self.label.setText("⚠ " + "\n".join(notes))
+        # Сначала показываем: скрытый виджет не разкладывает лэйаут, и крестик
+        # остаётся с нулевой геометрией.
+        self.show()
+        self.adjustSize()
+        self.reveal()
 
-    def mouseMoveEvent(self, event) -> None:
-        region = -1 if event.position().x() < self.width() / 2 else 1
-        if region != self._region:
-            self._region = region
-            self.hover_stepped.emit(region)
-        super().mouseMoveEvent(event)
+    def reveal(self) -> None:
+        self.show()
+        self.raise_()
+        super().reveal()
+
+    def _on_fade_finished(self) -> None:
+        if self._effect.opacity() == 0.0:
+            self.hide()
+
+    def dismiss(self) -> None:
+        """Закрыть сразу — по крестику, смене фото или уходу с вкладки."""
+        self._timer.stop()
+        self._fade.stop()
+        self._effect.setOpacity(0.0)
+        self.hide()
 
 
 class PreviewArea(QFrame):
     """Область вкладок с наложенными прозрачными панелями управления."""
 
-    prev_requested = pyqtSignal()
-    next_requested = pyqtSignal()
     wheel_stepped = pyqtSignal(int)
 
-    def __init__(self, tabs: QTabWidget, zoom_overlay: ZoomOverlay, nav_overlay: NavOverlay):
+    def __init__(self, tabs: QTabWidget, zoom_overlay: ZoomOverlay,
+                 advisory_toast: AdvisoryToast | None = None):
         super().__init__()
         self.setObjectName("previewArea")
         layout = QVBoxLayout(self)
@@ -398,10 +473,13 @@ class PreviewArea(QFrame):
 
         self.tabs = tabs
         self.zoom_overlay = zoom_overlay
-        self.nav_overlay = nav_overlay
+        self.advisory_toast = advisory_toast
         self.can_interact: callable | None = None  # callable -> bool, есть ли загруженное фото
         self.image_rect_provider = None  # callable -> list[QRect] в координатах area
-        for overlay in (zoom_overlay, nav_overlay):
+        overlays = [zoom_overlay]
+        if advisory_toast is not None:
+            overlays.append(advisory_toast)
+        for overlay in overlays:
             overlay.setParent(self)
             # Панели не лежат в слое, поэтому размер берём из их sizeHint.
             overlay.adjustSize()
@@ -439,15 +517,22 @@ class PreviewArea(QFrame):
         QTimer.singleShot(0, self.reposition_overlays)
 
     def reposition_overlays(self) -> None:
-        """Оба оверлея закреплены в углах страницы с фото."""
+        """Оверлеи закреплены в углах страницы с фото."""
         self._place_zoom()
+        self._place_advisory()
+
+    def _place_advisory(self) -> None:
+        """Предупреждение в правом верхнем углу страницы, левее шкалы масштаба."""
+        toast = self.advisory_toast
+        if toast is None or toast.isHidden():
+            return
         page = self._page_rect()
-        nx = page.left() + (page.width() - self.nav_overlay.width()) // 2
-        ny = page.bottom() - self.nav_overlay.height() - 10
-        nx = max(page.left(), min(nx, page.right() - self.nav_overlay.width()))
-        ny = max(page.top(), min(ny, page.bottom() - self.nav_overlay.height()))
-        self.nav_overlay.move(nx, ny)
-        self.nav_overlay.raise_()
+        x = page.right() - self.zoom_overlay.width() - toast.width() - 20
+        y = page.top() + 10
+        x = max(page.left(), min(x, page.right() - toast.width()))
+        y = max(page.top(), min(y, page.bottom() - toast.height()))
+        toast.move(x, y)
+        toast.raise_()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -457,14 +542,7 @@ class PreviewArea(QFrame):
     def eventFilter(self, obj, event) -> bool:
         if self._inside(obj):
             allowed = self.can_interact is None or self.can_interact()
-            if event.type() == QEvent.Type.MouseButtonPress:
-                button = event.button()
-                if button in (Qt.MouseButton.XButton1, Qt.MouseButton.XButton2):
-                    if allowed:
-                        (self.prev_requested if button == Qt.MouseButton.XButton1
-                         else self.next_requested).emit()
-                    return True
-            elif event.type() == QEvent.Type.Wheel:
+            if event.type() == QEvent.Type.Wheel:
                 if allowed:
                     steps = event.angleDelta().y() // 120
                     if steps:
@@ -509,6 +587,8 @@ class MainWindow(QMainWindow):
         self.background_path: Path | None = None
         self.sliders: dict[str, tuple[QSlider, int, QLabel, str]] = {}
         self.previews: dict[str, tuple[ImagePreview, ...]] = {}
+        self._worker: CoreWorker | None = None
+        self._busy = False
 
         self._init_ui()
         self._connect_actions()
@@ -516,12 +596,12 @@ class MainWindow(QMainWindow):
         self._center_on_screen()
         self._ui_ready = True
 
-        self._log("OK", "Скелет окна готов. Откройте исходное фото через Файл → Открыть исходное фото.")
+        self._log("OK", "Готово. Откройте исходное фото через Файл → Открыть исходное фото.")
 
     # ---------- построение окна ----------
 
     def _init_ui(self) -> None:
-        self.setWindowTitle("Photo — замена фона (скелет)")
+        self.setWindowTitle("Photo — замена фона")
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setMinimumSize(800, 600)
         self.resize(1240, 820)
@@ -533,13 +613,14 @@ class MainWindow(QMainWindow):
         self._create_toolbar()
 
         self.params_zone = self._build_params_zone()
+        self.params_zone.setFixedWidth(PARAMS_WIDTH)
         self.preview_area = self._build_preview_zone()
         top_splitter = QSplitter(Qt.Orientation.Horizontal)
         top_splitter.addWidget(self.params_zone)
         top_splitter.addWidget(self.preview_area)
         top_splitter.setStretchFactor(0, 0)
         top_splitter.setStretchFactor(1, 1)
-        top_splitter.setSizes([340, 900])
+        top_splitter.setSizes([PARAMS_WIDTH, 900])
 
         self.log_zone = self._build_log_zone()
         main_splitter = QSplitter(Qt.Orientation.Vertical)
@@ -716,12 +797,12 @@ class MainWindow(QMainWindow):
         self.tb_open_source = action("Открыть фото", "SP_DialogOpenButton", "Выбрать исходное изображение")
         self.tb_open_background = action("Выбрать фон", "SP_DialogOpenButton", "Выбрать изображение фона")
         toolbar.addSeparator()
-        self.tb_cut = action("Вырезать", "SP_MediaPlay", "Вырезать объект (пока заглушка)")
+        self.tb_cut = action("Вырезать", "SP_MediaPlay", "Вырезать объект")
         self.tb_cut.setIcon(_solid_icon("SP_MediaPlay", "#16a34a"))
-        self.tb_generate = action("Сгенерировать фон", "SP_BrowserReload", "Генерация фона (пока заглушка)")
-        self.tb_upscale = action("Апскейл", "SP_ArrowUp", "Апскейл ×4 (пока заглушка)")
+        self.tb_generate = action("Сгенерировать фон", "SP_BrowserReload", "Генерация фона")
+        self.tb_upscale = action("Апскейл", "SP_ArrowUp", "Апскейл ×4 выбранного фона")
         self.tb_upscale.setIcon(_solid_icon("SP_ArrowUp", "#0ea5e9"))
-        self.tb_compose = action("Собрать", "SP_DialogApplyButton", "Собрать композит (пока заглушка)")
+        self.tb_compose = action("Собрать", "SP_DialogApplyButton", "Собрать композит")
         toolbar.addSeparator()
         self.tb_stop = action("Стоп", "SP_BrowserStop", "Остановить операцию")
         self.tb_stop.setEnabled(False)
@@ -770,6 +851,8 @@ class MainWindow(QMainWindow):
         self.prompt = QPlainTextEdit()
         self.prompt.setFixedHeight(64)
         box.addWidget(self.prompt)
+        self.btn_generate = QPushButton("Сгенерировать фон")
+        box.addWidget(self.btn_generate)
         form.addWidget(background)
 
         cut = QGroupBox("Вырезка")
@@ -836,41 +919,41 @@ class MainWindow(QMainWindow):
                 self.previews[name] = (preview,)
             self.tabs.addTab(widget, name)
 
-        # Вертикальная шкала 0–100% с цифрами в правом верхнем углу изображения.
+        # Кнопка сохранения — в том же ряду, что и вкладки, справа от них.
+        self.btn_save_current = QPushButton(_icon("SP_DirIcon"), "Сохранить")
+        self.btn_save_current.setObjectName("saveCurrent")
+        self.btn_save_current.setToolTip("Сохранить изображение текущей вкладки")
+        self.btn_save_current.setEnabled(False)
+        self.tabs.setCornerWidget(self.btn_save_current, Qt.Corner.TopRightCorner)
+
+        # Вертикальная шкала кратности в правом верхнем углу изображения.
         zoom_overlay = ZoomOverlay()
         zoom_layout = QHBoxLayout(zoom_overlay)
-        zoom_layout.setContentsMargins(6, 6, 6, 6)
+        zoom_layout.setContentsMargins(4, 6, 4, 6)
         zoom_layout.setSpacing(2)
         labels = QVBoxLayout()
         labels.setSpacing(0)
-        for value in (100, 50, 0, -50, -100):
-            label = QLabel(str(value))
+        for value, text in ZOOM_LABELS:
+            label = QLabel(text)
+            label.setObjectName("zoomLabel")
             label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            label.setFixedWidth(30)
+            label.setFixedWidth(24)
             labels.addWidget(label)
-            if value != -100:
+            if value != ZOOM_MIN:
                 labels.addStretch()
         zoom_layout.addLayout(labels)
         self.zoom_slider = QSlider(Qt.Orientation.Vertical)
-        self.zoom_slider.setRange(-100, 100)  # 0 = исходный масштаб (вписать)
+        self.zoom_slider.setObjectName("zoomSlider")
+        self.zoom_slider.setRange(ZOOM_MIN, ZOOM_MAX)  # -100 → ÷2, 0 → ×1, +200 → ×4
         self.zoom_slider.setValue(0)
         self.zoom_slider.setSingleStep(5)
-        self.zoom_slider.setFixedHeight(140)
+        self.zoom_slider.setFixedHeight(120)  # та же высота, что у области подписей: метки совпадают с ручкой
         zoom_layout.addWidget(self.zoom_slider)
 
-        # Минимальная навигация: только две стрелки внизу изображения.
-        nav_overlay = NavOverlay()
-        nav_layout = QHBoxLayout(nav_overlay)
-        nav_layout.setContentsMargins(6, 4, 6, 4)
-        nav_layout.setSpacing(4)
-        self.btn_prev_bg = QPushButton("◀")
-        self.btn_prev_bg.setFixedWidth(30)
-        self.btn_next_bg = QPushButton("▶")
-        self.btn_next_bg.setFixedWidth(30)
-        nav_layout.addWidget(self.btn_prev_bg)
-        nav_layout.addWidget(self.btn_next_bg)
-
-        area = PreviewArea(self.tabs, zoom_overlay, nav_overlay)
+        # Всплывающее предупреждение о качестве вырезки — не занимает место в слое.
+        advisory_toast = AdvisoryToast()
+        self.advisory_toast = advisory_toast
+        area = PreviewArea(self.tabs, zoom_overlay, advisory_toast)
         self.preview_area_controls = area
         layout.addWidget(area)
         return frame
@@ -917,6 +1000,10 @@ class MainWindow(QMainWindow):
         label = QLabel(text)
         label.setObjectName("pathLabel")
         label.setWordWrap(True)
+        # Путь Windows не содержит точек разрыва — minimumSizeHint() становится
+        # равным всей строке (до 1200 px) и давит на splitter. Забираем размер
+        # подсказку у политики: метка переносится внутри отведённой ширины.
+        label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         return label
 
@@ -961,15 +1048,13 @@ class MainWindow(QMainWindow):
         self.act_show_log.toggled.connect(self._on_toggle_log)
 
         zoom_overlay = self.preview_area_controls.zoom_overlay
-        nav_overlay = self.preview_area_controls.nav_overlay
         self.preview_area_controls.can_interact = self._has_current_image
         zoom_overlay.can_reveal = self._has_current_image
-        nav_overlay.can_reveal = self._has_current_image
         self.zoom_slider.valueChanged.connect(self._on_zoom_value)
         self.preview_area_controls.wheel_stepped.connect(zoom_overlay.reveal)
         self.preview_area_controls.wheel_stepped.connect(
             lambda steps: self.zoom_slider.setValue(
-                max(-100, min(100, self.zoom_slider.value() + steps * 5))
+                max(ZOOM_MIN, min(ZOOM_MAX, self.zoom_slider.value() + steps * 5))
             )
         )
         self.btn_fit_view.clicked.connect(lambda: self.zoom_slider.setValue(0))
@@ -980,33 +1065,27 @@ class MainWindow(QMainWindow):
         for previews in self.previews.values():
             for preview in previews:
                 preview.moved.connect(self.preview_area_controls.reposition_overlays)
+                preview.moved.connect(self._update_save_action)
 
-        self.btn_prev_bg.clicked.connect(nav_overlay.reveal)
-        self.btn_next_bg.clicked.connect(nav_overlay.reveal)
-        self.btn_prev_bg.clicked.connect(lambda: self._cycle_background(-1))
-        self.btn_next_bg.clicked.connect(lambda: self._cycle_background(1))
-        self.preview_area_controls.prev_requested.connect(nav_overlay.reveal)
-        self.preview_area_controls.next_requested.connect(nav_overlay.reveal)
-        self.preview_area_controls.prev_requested.connect(lambda: self._cycle_background(-1))
-        self.preview_area_controls.next_requested.connect(lambda: self._cycle_background(1))
-        self.preview_area_controls.nav_overlay.hover_stepped.connect(nav_overlay.reveal)
-        self.preview_area_controls.nav_overlay.hover_stepped.connect(
-            lambda direction: self._cycle_background(direction)
-        )
+        self.btn_save_current.clicked.connect(self.save_current)
+        self.tabs.currentChanged.connect(self._update_save_action)
+        self._update_save_action()
 
         self.tb_open_source.triggered.connect(self.open_source)
         self.tb_open_background.triggered.connect(self.open_background)
-        self.tb_cut.triggered.connect(lambda: self._stub("Вырезка"))
-        self.tb_generate.triggered.connect(lambda: self._stub("Генерация фона"))
-        self.tb_upscale.triggered.connect(lambda: self._stub("Апскейл"))
-        self.tb_compose.triggered.connect(lambda: self._stub("Сборка композита"))
-        self.tb_stop.triggered.connect(lambda: self._log("INFO", "Операция не запущена — останавливать нечего."))
+        self.tb_cut.triggered.connect(self.run_cut)
+        self.tb_generate.triggered.connect(self.run_generate)
+        self.btn_generate.clicked.connect(self.run_generate)
+        self.tb_upscale.triggered.connect(self.run_upscale)
+        self.tb_compose.triggered.connect(self.run_compose)
+        self.tb_stop.triggered.connect(self.stop_operation)
         self.tb_save.triggered.connect(self.save_result)
 
         self.btn_pick_source.clicked.connect(self.open_source)
         self.btn_pick_background.clicked.connect(self.open_background)
-        self.btn_cut.clicked.connect(lambda: self._stub("Вырезка"))
-        self.btn_compose.clicked.connect(lambda: self._stub("Сборка композита"))
+        self.btn_cut.clicked.connect(self.run_cut)
+        self.btn_compose.clicked.connect(self.run_compose)
+        self.btn_stop.clicked.connect(self.stop_operation)
 
     # ---------- действия ----------
 
@@ -1017,59 +1096,71 @@ class MainWindow(QMainWindow):
         """Функции доступны, только если в текущей вкладке есть изображение."""
         return any(preview.source_pixmap() is not None for preview in self._current_previews())
 
+    def _can_save_current(self) -> bool:
+        """Кнопка «Сохранить» активна для промежуточных вкладок с картинкой."""
+        name = self.tabs.tabText(self.tabs.currentIndex())
+        if name not in SAVE_TABS:
+            return False
+        return all(preview.source_pixmap() is not None for preview in self.previews[name])
+
+    def _update_save_action(self, _index: int | None = None) -> None:
+        self.btn_save_current.setEnabled(not self._busy and self._can_save_current())
+
     def _on_tab_changed(self, index: int) -> None:
+        if self.tabs.tabText(index) != "Исходник":
+            self.advisory_toast.dismiss()
         if not self._has_current_image():
-            area = self.preview_area_controls
-            area.zoom_overlay._hide()
-            area.nav_overlay._hide()
+            self.preview_area_controls.zoom_overlay._hide()
+
+    def _dialog_start_dir(self, key: str, fallback: Path) -> str:
+        """Папка последнего файла; если её уже нет — стандартная папка проекта."""
+        start = self.settings.value(key, "", type=str)
+        if start and Path(start).is_dir():
+            return start
+        return str(fallback if fallback.is_dir() else DATA_DIR)
 
     def open_source(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Открыть исходное фото", str(DATA_DIR), IMAGE_FILTER)
+        start = self._dialog_start_dir("paths/last_source_dir", DATA_DIR)
+        path, _ = QFileDialog.getOpenFileName(self, "Открыть исходное фото", start, IMAGE_FILTER)
         if not path:
             return
+        self.settings.setValue("paths/last_source_dir", str(Path(path).parent))
         self.source_path = Path(path)
         if self.previews["Исходник"][0].set_image(path):
             self.previews["До — После"][0].set_image(path)
             self.lbl_source.setText(path)
             self._log("OK", f"Исходное фото: {path}")
+            self._update_source_advisory(path)
+            self._update_save_action()
+            self._activate_tab("Исходник")
         else:
             self._log("ERROR", f"Не удалось прочитать: {path}")
+            self.advisory_toast.dismiss()
 
     def open_background(self) -> None:
-        start = str(BG_DIR) if BG_DIR.exists() else str(DATA_DIR)
+        start = self._dialog_start_dir("paths/last_bg_dir", BG_DIR)
         path, _ = QFileDialog.getOpenFileName(self, "Открыть фон", start, IMAGE_FILTER)
         if path:
+            self.settings.setValue("paths/last_bg_dir", str(Path(path).parent))
             self._set_background(Path(path))
 
-    def _set_background(self, path: Path) -> None:
-        if self.previews["Фон"][0].set_image(path):
-            self.background_path = path
-            self.lbl_background.setText(str(path))
+    def _set_background(self, path: Path, quiet: bool = False) -> None:
+        """Фон выбирается один раз: диалогом, генерацией или апскейлом."""
+        if not self.previews["Фон"][0].set_image(path):
+            return
+        self.background_path = path
+        self.lbl_background.setText(str(path))
+        if not quiet:
             self._log("OK", f"Фон: {path}")
-
-    def _bg_files(self) -> list[Path]:
-        if not BG_DIR.exists():
-            return []
-        return sorted(
-            p for p in BG_DIR.iterdir()
-            if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
-        )
-
-    def _cycle_background(self, delta: int) -> None:
-        if not self._has_current_image():
-            return
-        files = self._bg_files()
-        if not files:
-            self._log("WARN", "В data\\bg нет изображений для перебора.")
-            return
-        index = files.index(self.background_path) if self.background_path in files else -1
-        self._set_background(files[(index + delta) % len(files)])
+        self._update_save_action()
 
     def open_settings(self) -> None:
         dialog = SettingsDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._load_settings()
+            self._load_settings()  # промпт из диалога должен попасть в current_params()
             self._log("OK", "Настройки сохранены.")
+            if dialog.generate_requested:
+                self.run_generate()
 
     def save_result(self) -> None:
         preview = self.previews["Результат"][0]
@@ -1085,6 +1176,66 @@ class MainWindow(QMainWindow):
         else:
             self._log("ERROR", f"Не удалось сохранить: {out}")
 
+    @staticmethod
+    def _combine_side_by_side(before: QPixmap, after: QPixmap) -> QPixmap:
+        """Сложить половинки «До — После» в одно изображение."""
+        height = max(before.height(), after.height())
+
+        def fit(pixmap: QPixmap) -> QPixmap:
+            if not pixmap.height():
+                return pixmap
+            width = round(pixmap.width() * height / pixmap.height())
+            return pixmap.scaled(
+                width, height, Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+
+        left, right = fit(before), fit(after)
+        gap = 6
+        combined = QPixmap(left.width() + gap + right.width(), height)
+        combined.fill(Qt.GlobalColor.white)
+        painter = QPainter(combined)
+        painter.drawPixmap(0, 0, left)
+        painter.drawPixmap(left.width() + gap, 0, right)
+        painter.end()
+        return combined
+
+    def _save_pixmap(self, tab: str) -> QPixmap | None:
+        previews = self.previews[tab]
+        if tab == "До — После":
+            return self._combine_side_by_side(
+                previews[0].source_pixmap(), previews[1].source_pixmap()
+            )
+        return previews[0].source_pixmap()
+
+    def save_current(self) -> None:
+        """Сохранить изображение текущей вкладки через диалог выбора файла."""
+        if self._busy or not self._can_save_current():
+            return
+        tab = self.tabs.tabText(self.tabs.currentIndex())
+        default_name, filters = SAVE_PRESETS[tab]
+        start = Path(self._dialog_start_dir("paths/last_save_dir", DATA_DIR)) / default_name
+        chosen, _ = QFileDialog.getSaveFileName(self, f"Сохранить: {tab}", str(start), filters)
+        if not chosen:
+            return
+        path = Path(chosen)
+        if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".bmp", ".webp"}:
+            path = path.with_suffix(".png" if tab == "Вырезка" else ".jpg")
+        if tab == "Вырезка" and path.suffix.lower() != ".png":
+            self._log("WARN", "JPEG не сохраняет прозрачность — для вырезки лучше PNG.")
+        pixmap = self._save_pixmap(tab)
+        if pixmap is None:
+            self._log("WARN", f"Нечего сохранять во вкладке «{tab}».")
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fmt = "PNG" if path.suffix.lower() == ".png" else "JPG"
+        if pixmap.save(str(path), fmt, 92):
+            self.settings.setValue("paths/last_save_dir", str(path.parent))
+            self._log("OK", f"Сохранено ({tab}): {path}")
+            self.statusBar().showMessage(f"Сохранено: {path}", 5000)
+        else:
+            self._log("ERROR", f"Не удалось сохранить: {path}")
+
     def _on_zoom_value(self, value: int) -> None:
         if not self._has_current_image():
             blocker = QSignalBlocker(self.zoom_slider)
@@ -1096,7 +1247,7 @@ class MainWindow(QMainWindow):
             self.preview_area_controls.zoom_overlay.reveal()
 
     def _set_zoom_percent(self, value: int) -> None:
-        """0 — исходный масштаб (вписать), −100 / +100 — вдвое меньше/больше."""
+        """Кратность к вписанному кадру: −100 → ÷2, 0 → ×1, +200 → ×4."""
         if not self._has_current_image():
             return
         for preview in self.previews.get(self.tabs.tabText(self.tabs.currentIndex()), ()):
@@ -1119,7 +1270,7 @@ class MainWindow(QMainWindow):
             factor = preview.fit_factor()
             value = round(math.log2(zoom / factor) * 100) if factor > 0 and zoom > 0 else 0
         blocker = QSignalBlocker(self.zoom_slider)
-        self.zoom_slider.setValue(max(-100, min(100, value)))
+        self.zoom_slider.setValue(max(ZOOM_MIN, min(ZOOM_MAX, value)))
         blocker.unblock()
 
     def _apply_theme(self, name: str) -> None:
@@ -1146,8 +1297,173 @@ class MainWindow(QMainWindow):
         _slider, factor, label, fmt = self.sliders[key]
         label.setText(fmt.format(value / factor))
 
-    def _stub(self, name: str) -> None:
-        self._log("INFO", f"«{name}» — заглушка скелета, операция ещё не подключена к core.")
+    # ---------- фоновые операции ----------
+
+    def run_cut(self) -> None:
+        params = self.current_params()
+        if not params["source"]:
+            self._log("WARN", "Вырезка: сначала откройте исходное фото.")
+            return
+        self._start_worker(
+            "Вырезка", cut_task, params["source"],
+            options={
+                "portrait": params["portrait"],
+                "model": params["cut_model"],
+                "tile": params["cut_tile"],
+                "sigma": params["cut_sigma"],
+                "head_ratio": params["cut_head_ratio"],
+                "matting": params["cut_matting"],
+            },
+        )
+
+    def run_generate(self) -> None:
+        params = self.current_params()
+        prompt = str(params["prompt"]).strip()
+        if not prompt:
+            self._log("WARN", "Генерация фона: введите промпт в панели параметров.")
+            return
+        self._start_worker(
+            "Генерация фона", genbg_task, prompt,
+            options={
+                "provider": params["provider"],
+                "seed": params["bg_seed"],
+                "size": params["bg_size"],
+            },
+        )
+
+    def run_upscale(self) -> None:
+        params = self.current_params()
+        if not params["background"]:
+            self._log("WARN", "Апскейл: сначала выберите фон.")
+            return
+        self._start_worker("Апскейл", upscale_task, params["background"])
+
+    def run_compose(self) -> None:
+        params = self.current_params()
+        if not params["source"] or not params["background"]:
+            self._log("WARN", "Сборка композита: нужны исходное фото и фон.")
+            return
+        if not Path(CUTOUT_FILE).exists():
+            self._log("WARN", "Сборка композита: сначала вырежьте объект.")
+            return
+        self._start_worker(
+            "Сборка композита", compose_task, str(CUTOUT_FILE), params["background"],
+            options={
+                "blur": params["blur"],
+                "shadow": params["shadow"],
+                "tone": params["tone"],
+                "grain": params["grain"],
+                "seed": params["compose_seed"],
+            },
+        )
+
+    def stop_operation(self) -> None:
+        if self._worker is None or not self._worker.isRunning():
+            self._log("INFO", "Операция не запущена — останавливать нечего.")
+            return
+        self._worker.cancel()
+        self._log("WARN", "Отмена запрошена — операция остановится на следующем этапе.")
+
+    def _start_worker(self, name: str, func, *args, **kwargs) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            self._log("WARN", f"«{name}» не запущена: выполняется другая операция.")
+            return
+        worker = CoreWorker(func, *args, **kwargs)
+        self._worker = worker
+        worker.progress.connect(self._on_progress)
+        worker.succeeded.connect(lambda result, n=name: self._on_operation_success(n, result))
+        worker.failed.connect(lambda message, n=name: self._on_operation_failed(n, message))
+        worker.cancelled.connect(lambda n=name: self._on_operation_cancelled(n))
+        worker.finished.connect(self._on_worker_finished)
+        self._set_busy(True)
+        self._log("INFO", f"{name}: запуск…")
+        worker.start()
+
+    def _set_busy(self, busy: bool) -> None:
+        for widget in (
+            self.tb_cut, self.tb_generate, self.tb_upscale, self.tb_compose,
+            self.tb_save, self.act_save_result, self.btn_cut, self.btn_generate,
+            self.btn_compose,
+        ):
+            widget.setEnabled(not busy)
+        self._busy = busy
+        self._update_save_action()
+        self.btn_stop.setEnabled(busy)
+        self.tb_stop.setEnabled(busy)
+        if busy:
+            self.progress.setRange(0, 0)  # неопределённый режим до первого отчёта
+            self.progress.setValue(0)
+        elif self.progress.maximum() == 0:
+            self.progress.setRange(0, 100)
+
+    def _on_progress(self, percent: int, message: str) -> None:
+        if percent < 0:
+            self.progress.setRange(0, 0)
+        else:
+            if self.progress.maximum() == 0:
+                self.progress.setRange(0, 100)
+            self.progress.setValue(max(0, min(100, percent)))
+        if message:
+            self.statusBar().showMessage(message)
+
+    def _on_operation_success(self, name: str, result) -> None:
+        path = Path(str(result))
+        if name == "Вырезка":
+            self._show_preview("Вырезка", path)
+            self._activate_tab("Вырезка")
+        elif name in ("Генерация фона", "Апскейл"):
+            self._set_background(path, quiet=True)
+            self._activate_tab("Фон")
+        elif name == "Сборка композита":
+            self._show_preview("Результат", path)
+            self._show_preview("До — После", path, 1)
+        self._log("OK", f"{name}: {path}")
+
+    def _on_operation_failed(self, name: str, message: str) -> None:
+        self._log("ERROR", f"{name}: {message}")
+
+    def _on_operation_cancelled(self, name: str) -> None:
+        self._log("WARN", f"{name}: отменено.")
+
+    def _on_worker_finished(self) -> None:
+        worker = self._worker
+        self._set_busy(False)
+        self.statusBar().showMessage("Готово", 3000)
+        self._worker = None
+        if worker is not None:
+            worker.deleteLater()
+
+    def _show_preview(self, tab: str, path: Path, index: int = 0) -> None:
+        preview = self.previews[tab][index]
+        if not preview.set_image(path):
+            self._log("ERROR", f"Не удалось показать {path} во вкладке «{tab}».")
+        self._update_save_action()
+
+    def _activate_tab(self, name: str) -> None:
+        """Сделать вкладку текущей, если она уже не открыта."""
+        for index in range(self.tabs.count()):
+            if self.tabs.tabText(index) == name:
+                if self.tabs.currentIndex() != index:
+                    self.tabs.setCurrentIndex(index)
+                return
+
+    def _update_source_advisory(self, path: str | Path | None) -> None:
+        """Всплывающее предупреждение и записи в лог о качестве вырезки."""
+        if path is None:
+            self.advisory_toast.dismiss()
+            return
+        try:
+            notes = cut_advisory(path)
+        except Exception as exc:  # плохой файл не должен ломать открытие
+            LOG.warning("не удалось оценить кадр: %s", exc)
+            notes = []
+        if not notes:
+            self.advisory_toast.dismiss()
+            return
+        for note in notes:
+            self._log("WARN", note)
+        self.advisory_toast.show_notes(notes)
+        self.preview_area_controls.reposition_overlays()
 
     def _log(self, level: str, message: str) -> None:
         color = LEVEL_COLORS.get(level, "#e2e8f0")
@@ -1160,16 +1476,19 @@ class MainWindow(QMainWindow):
 
     def _load_settings(self) -> None:
         s = self.settings
-        index = self.cut_model.findText(str(s.value("cut/model", CUT_MODELS[0])))
+        index = self.cut_model.findText(str(s.value("cut/model", APP_DEFAULTS["cut/model"])))
         if index >= 0:
             self.cut_model.setCurrentIndex(index)
-        self.portrait.setChecked(s.value("cut/portrait", True, type=bool))
-        self.prompt.setPlainText(
-            str(s.value("bg/prompt", "realistic photo, no people, no text, soft overcast light"))
-        )
+        self.portrait.setChecked(s.value("cut/portrait", APP_DEFAULTS["cut/portrait"], type=bool))
+        self.prompt.setPlainText(str(s.value("bg/prompt", APP_DEFAULTS["bg/prompt"])))
         # Ползунки хранят масштабированные целые, а диалог настроек —
         # вещественные значения. Приводим к одному формату на чтении.
-        defaults = {"blur": 0.5, "shadow": 0.22, "tone": 1.06, "grain": 4.5}
+        defaults = {
+            "blur": APP_DEFAULTS["compose/blur"],
+            "shadow": APP_DEFAULTS["compose/shadow"],
+            "tone": APP_DEFAULTS["compose/tone"],
+            "grain": APP_DEFAULTS["compose/grain"],
+        }
         for key, default in defaults.items():
             raw = s.value(f"compose/{key}", default)
             try:
@@ -1193,14 +1512,28 @@ class MainWindow(QMainWindow):
         self.zoom_slider.setValue(0)
         self._sync_zoom_controls()
 
+    def _setting_number(self, key: str, default, cast):
+        try:
+            return cast(self.settings.value(key, default))
+        except (TypeError, ValueError):
+            return default
+
     def current_params(self) -> dict:
-        """Текущие параметры задачи — понадобятся воркерам после подключения core."""
+        """Параметры задачи для воркеров: UI, ползунки и раздел настроек."""
         params = {
             "cut_model": self.cut_model.currentText(),
             "portrait": self.portrait.isChecked(),
             "prompt": self.prompt.toPlainText(),
             "source": str(self.source_path) if self.source_path else None,
             "background": str(self.background_path) if self.background_path else None,
+            "provider": str(self.settings.value("bg/provider_api", APP_DEFAULTS["bg/provider_api"])),
+            "bg_seed": self._setting_number("bg/seed", APP_DEFAULTS["bg/seed"], int),
+            "bg_size": str(self.settings.value("bg/size", APP_DEFAULTS["bg/size"])),
+            "cut_tile": self._setting_number("cut/tile", APP_DEFAULTS["cut/tile"], int),
+            "cut_sigma": self._setting_number("cut/sigma", APP_DEFAULTS["cut/sigma"], float),
+            "cut_head_ratio": self._setting_number("cut/head_ratio", APP_DEFAULTS["cut/head_ratio"], float),
+            "cut_matting": bool(self.settings.value("cut/matting", APP_DEFAULTS["cut/matting"], type=bool)),
+            "compose_seed": self._setting_number("compose/seed", APP_DEFAULTS["compose/seed"], int),
         }
         for key, (slider, factor, _, _) in self.sliders.items():
             params[key] = slider.value() / factor

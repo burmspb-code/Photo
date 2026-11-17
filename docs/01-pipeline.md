@@ -3,19 +3,23 @@
 ## Схема
 
 ```text
-OpenCode (плагин photo-tools)   или   PyCharm / терминал
+OpenCode (плагин photo-tools)   или   PyCharm / терминал   или   GUI (main.py)
   │
   ├── .venv\Scripts\python.exe            Poetry-окружение Python 3.14
-  │     └── src\photo_pipeline.py          код пайплайна в проекте
-  │           ├── BiRefNet + pymatting     вырезка
-  │           ├── Cloudflare / Google / Stability / HF / Pollinations   фон
-  │           ├── Real-ESRGAN ×4           апскейл
-  │           └── OpenCV                   композит
+  │     ├── src\photo_pipeline.py          CLI-адаптер (разбор аргументов)
+  │     ├── src\ui\workers.py              QThread: прогресс и отмена
+  │     └── src\core\                      основная логика
+  │           ├── cutout.py                BiRefNet + pymatting, вырезка
+  │           ├── backgrounds.py           Cloudflare / Google / Stability / HF / Pollinations
+  │           ├── upscale.py               Real-ESRGAN ×4
+  │           ├── compose.py               OpenCV, композит
+  │           ├── progress.py              колбэки прогресса и check_cancel
+  │           └── tasks.py                 файловые задачи для GUI
   ├── models\                              ONNX-модели внутри проекта
   └── data\                                все изображения
 ```
 
-Плагин `photo-tools` — обёртка: запускает Python-скрипт и подставляет пути. Логика целиком в `src\photo_pipeline.py`. Плагин берёт `.venv` и `src\photo_pipeline.py`, а если их нет — откатывается на старое окружение `%LOCALAPPDATA%\rembg-env`.
+Плагин `photo-tools` — обёртка: запускает Python-скрипт и подставляет пути. `src\photo_pipeline.py` остался тонким CLI-адаптером, вся логика лежит в `src\core\`; пути запуска для плагина не изменились. Плагин берёт `.venv` и `src\photo_pipeline.py`, а если их нет — откатывается на старое окружение `%LOCALAPPDATA%\rembg-env`. GUI вызывает те же функции через `src\core\tasks.py` и `CoreWorker`, не запуская отдельный процесс.
 
 ## Проект и окружения
 
@@ -23,7 +27,7 @@ OpenCode (плагин photo-tools)   или   PyCharm / терминал
 |---|---|
 | Корень проекта | `C:\My_projects\Photo` |
 | Данные | `data\` (черновики — `data\bg\`, результаты — `data\results\`) |
-| Код | `src\photo_pipeline.py`, `src\contact_sheet.py` |
+| Код | `src\core\`, `src\photo_pipeline.py` (CLI), `src\contact_sheet.py`, `src\ui\` (GUI) |
 | Модели | `models\faceparser.onnx`, `models\realesr-general-x4v3.onnx` |
 | Poetry-окружение | `.venv\` (Python 3.14, интерпретатор PyCharm) |
 | Метаданные Poetry | `pyproject.toml`, `poetry.lock` |
@@ -80,7 +84,10 @@ Set-Location $root
 ```
 
 - По умолчанию включён портретный режим: тайловый BiRefNet + pymatting.
-- Идёт 1–2 минуты — это норма, не зависание.
+- Кадр покрывается целиком сеткой тайлов `tiling_plan()` из `src\core\cutout.py`: для стороны ≤ `2 × tile` — старые 2 тайла (с перекрытием, побайтово совпадает с результатом C), для больших кадров — шаг `tile // 2` (50 % перекрытия) и последний тайл впритык к краю, чтобы не оставалось непокрытых полос. Например, 2592×3456 даёт 4×6 = 24 тайла вместо прежних 4 с 53 % «дыр» посередине.
+- Если отдельный тайл вышел почти сплошь непрозрачным (coverage > 0,9 — модель не нашла в нём объект), `_tile_with_context()` повторяет сегментацию с захватом `tile // 2` пикселей вокруг и вырезает исходную область. Так левая часть кадра 2048×1536, где модель видела только фон и возвращала сплошную маску, становится прозрачной. На утверждённом фото максимальный coverage тайла 0,61, поэтому повторов нет и результат остаётся побайтово тем же.
+- `cut_advisory(src)` возвращает предупреждения о большом или низкоконтрастном кадре; GUI показывает их всплывающим уведомлением в правом верхнем углу вкладки `Исходник` (5 с, закрывается крестиком) и дублирует в лог.
+- Идёт 1–2 минуты на небольшом кадре и до ~7 минут на 24 тайлах — это норма, не зависание.
 - Результат — RGBA PNG. Модель `birefnet-general` скачивается rembg в его кэш при первом запуске.
 
 ### Композит
@@ -102,21 +109,22 @@ Set-Location $root
 ### Генерация фона
 
 ```powershell
-& $py $pp genbg "<prompt>" "$data\bg\out.jpg" `
-  --width 1632 --height 1224 `
+& $py $pp genbg "скалистый берег, чайки, облачно" "$data\bg\out.jpg" `
   --provider cloudflare `
-  --model "@cf/black-forest-labs/flux-1-schnell" `
-  --no-upscale
+  --size 2K
 ```
 
 | Флаг | Значение |
 |---|---|
 | `--provider` | `auto`, `google`, `cloudflare`, `stability`, `huggingface`, `pollinations` |
-| `--width`, `--height` | Влияют на соотношение сторон и кроп; у Pollinations ещё и на размер |
+| `--size` | `1K` (1024×768), `2K` (2048×1536), `4K` (4096×3072) — конечный размер файла |
+| `--width`, `--height` | Влияют на соотношение сторон и кроп; у Pollinations ещё и на размер. Игнорируются при заданном `--size` |
 | `--model` | Переопределение модели провайдера |
-| `--no-upscale` | Не делать апскейл ×4 сразу после генерации |
+| `--no-upscale` | Не делать апскейл ×4 сразу после генерации (только без `--size`) |
 
-По умолчанию `genbg` делает апскейл ×4, если модель `models\realesr-general-x4v3.onnx` на месте. Для черновиков быстрее `--no-upscale`.
+Русский промпт переводится на английский автоматически (`src.core.prompt`, публичный endpoint Google Translate без ключа); упоминания разрешения («в 2К», «4k») удаляются. Если перевод недоступен, промпт уходит как есть.
+
+По умолчанию `genbg` делает апскейл ×4, если модель `models\realesr-general-x4v3.onnx` на месте. Для черновиков быстрее `--no-upscale`. При заданном `--size` пресет важнее: результат сначала апскейлится ×4 (если провайдер отдал меньше), затем доводится до точного размера через `cv2.resize`.
 
 ### Апскейл
 
@@ -179,7 +187,7 @@ google → cloudflare → stability → huggingface → pollinations
 
 ## Особенности окружения
 
-- **IPv6 зависает.** В `photo_pipeline.py` стоит патч `socket.getaddrinfo`, который принудительно предпочитает IPv4. Сторонние клиенты и Node `fetch` этого патча не имеют — для разовых запросов использовать `curl.exe -4`.
+- **IPv6 зависает.** В `src\core\settings.py` стоит патч `socket.getaddrinfo`, который принудительно предпочитает IPv4 (применяется до импорта rembg). Сторонние клиенты и Node `fetch` этого патча не имеют — для разовых запросов использовать `curl.exe -4`.
 - **Node/npm/bun не установлены.** TS-плагин не собирается; OpenCode загружает его сам. Если плагин не появился — смотреть `%USERPROFILE%\.local\share\opencode\log\opencode.log`.
 - **Прав администратора нет.** `hosts` и системные установки недоступны.
 - **PowerShell искажает кириллицу в консоли.** Файлы в UTF-8, это только отображение. Путь проекта ASCII; кириллица осталась только в пути исходника (`Изображения`).

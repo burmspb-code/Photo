@@ -44,6 +44,11 @@ _DARK = {
     "overlay_bg": "#1e293b",
     "overlay_border": "#475569",
     "overlay_text": "#cbd5e1",
+    "warning": "#f59e0b",
+    "zoom_bg": "rgba(30, 41, 59, 170)",
+    "zoom_text": "rgba(203, 213, 225, 200)",
+    "zoom_groove": "rgba(148, 163, 184, 110)",
+    "zoom_handle": "#94a3b8",
 }
 
 _LIGHT = {
@@ -88,6 +93,11 @@ _LIGHT = {
     "overlay_bg": "rgba(255, 255, 255, 235)",
     "overlay_border": "#cbd5e1",
     "overlay_text": "#334155",
+    "warning": "#b45309",
+    "zoom_bg": "rgba(255, 255, 255, 205)",
+    "zoom_text": "rgba(71, 85, 105, 210)",
+    "zoom_groove": "rgba(100, 116, 139, 90)",
+    "zoom_handle": "#64748b",
 }
 
 _STYLE = Template(
@@ -124,17 +134,47 @@ QFrame#previewArea {
     background: $preview_bg;
     border: 0;
 }
-QFrame#zoomBar, QFrame#navBar {
+QFrame#zoomBar {
+    background: $zoom_bg;
+    border: 0;
+    border-radius: 10px;
+}
+QLabel#zoomLabel {
+    color: $zoom_text;
+    font-size: 10px;
+    background: transparent;
+}
+QSlider#zoomSlider {
+    background: transparent;
+}
+QSlider#zoomSlider::groove:vertical {
+    background: $zoom_groove;
+    width: 2px;
+    border-radius: 1px;
+}
+QSlider#zoomSlider::handle:vertical {
+    background: $zoom_handle;
+    width: 10px;
+    height: 10px;
+    margin: 0 -4px;
+    border-radius: 5px;
+}
+QFrame#advisoryToast {
     background: $overlay_bg;
-    border: 1px solid $overlay_border;
+    border: 1px solid $warning;
     border-radius: 6px;
     color: $overlay_text;
 }
-QFrame#zoomBar QLabel, QFrame#navBar QLabel {
+QLabel#advisoryText {
     color: $overlay_text;
+    font-size: 11px;
 }
-QFrame#zoomBar QPushButton, QFrame#navBar QPushButton {
-    padding: 2px 6px;
+QPushButton#advisoryClose {
+    background: rgba(245, 158, 11, 30);
+    border: 1px solid $warning;
+    border-radius: 4px;
+    padding: 0;
+    color: $warning;
 }
 QScrollArea {
     background: $zone_bg;
@@ -283,6 +323,21 @@ QTabBar::tab:selected {
     border-color: $accent;
     color: $accent_text;
     font-weight: bold;
+}
+QPushButton#saveCurrent {
+    background: $button_bg;
+    border: 1px solid $button_border;
+    border-radius: 4px;
+    padding: 4px 8px;
+    margin: 2px 4px 2px 0;
+    color: $text;
+}
+QPushButton#saveCurrent:hover {
+    background: $button_hover;
+}
+QPushButton#saveCurrent:disabled {
+    color: $disabled;
+    border-color: $zone_bg;
 }
 QTextEdit#log {
     background: $log_bg;
