@@ -668,6 +668,7 @@ class MainWindow(QMainWindow):
         outer.addWidget(scroll)
 
         source = QGroupBox("Исходное фото")
+        source.setObjectName("taskSource")
         box = QVBoxLayout(source)
         self.lbl_source = self._path_label("Файл не выбран")
         box.addWidget(self.lbl_source)
@@ -676,6 +677,7 @@ class MainWindow(QMainWindow):
         form.addWidget(source)
 
         background = QGroupBox("Фон")
+        background.setObjectName("taskBackground")
         box = QVBoxLayout(background)
         self.lbl_background = self._path_label("Файл не выбран")
         box.addWidget(self.lbl_background)
@@ -688,6 +690,7 @@ class MainWindow(QMainWindow):
         form.addWidget(background)
 
         cut = QGroupBox("Вырезка")
+        cut.setObjectName("taskCut")
         box = QVBoxLayout(cut)
         box.addWidget(QLabel("Модель:"))
         self.cut_model = QComboBox()
@@ -700,6 +703,7 @@ class MainWindow(QMainWindow):
         form.addWidget(cut)
 
         compose = QGroupBox("Композит")
+        compose.setObjectName("taskCompose")
         box = QVBoxLayout(compose)
         self._add_slider(box, "Размытие фона", "blur", 0, 40, 5, 10, "{:.1f}")
         self._add_slider(box, "Контактная тень", "shadow", 0, 50, 22, 100, "{:.2f}")

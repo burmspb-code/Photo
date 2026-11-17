@@ -9,6 +9,10 @@ _DARK = {
     "zone_border": "#334155",
     "title": "#94a3b8",
     "group_text": "#cbd5e1",
+    "task_source": "#38bdf8",
+    "task_background": "#a78bfa",
+    "task_cut": "#34d399",
+    "task_compose": "#fbbf24",
     "path_text": "#cbd5e1",
     "preview_bg": "#0b1220",
     "preview_border": "#334155",
@@ -49,6 +53,10 @@ _LIGHT = {
     "zone_border": "#cbd5e1",
     "title": "#475569",
     "group_text": "#334155",
+    "task_source": "#0284c7",
+    "task_background": "#7c3aed",
+    "task_cut": "#059669",
+    "task_compose": "#d97706",
     "path_text": "#334155",
     "preview_bg": "#e2e8f0",
     "preview_border": "#cbd5e1",
@@ -142,8 +150,9 @@ QGroupBox {
     background: $zone_bg;
     border: 1px solid $zone_border;
     border-radius: 6px;
-    margin-top: 10px;
-    padding-top: 10px;
+    margin-top: 12px;
+    padding-top: 12px;
+    font-size: 13px;
     font-weight: bold;
     color: $group_text;
 }
@@ -151,6 +160,32 @@ QGroupBox::title {
     subcontrol-origin: margin;
     left: 10px;
     padding: 0 4px;
+    font-size: 14px;
+    font-weight: bold;
+}
+QGroupBox#taskSource {
+    border: 2px solid $task_source;
+}
+QGroupBox#taskSource::title {
+    color: $task_source;
+}
+QGroupBox#taskBackground {
+    border: 2px solid $task_background;
+}
+QGroupBox#taskBackground::title {
+    color: $task_background;
+}
+QGroupBox#taskCut {
+    border: 2px solid $task_cut;
+}
+QGroupBox#taskCut::title {
+    color: $task_cut;
+}
+QGroupBox#taskCompose {
+    border: 2px solid $task_compose;
+}
+QGroupBox#taskCompose::title {
+    color: $task_compose;
 }
 QMenuBar {
     background: $menu_bg;
