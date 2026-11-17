@@ -10,9 +10,12 @@
 """
 from __future__ import annotations
 
+import ctypes
 import html
 import logging
 import math
+import sys
+from ctypes import wintypes
 from pathlib import Path
 
 from PyQt6.QtCore import (
@@ -21,13 +24,24 @@ from PyQt6.QtCore import (
     QPoint,
     QPropertyAnimation,
     QRect,
+    QRectF,
     QSettings,
     QSignalBlocker,
     QSize,
     QTimer,
     pyqtSignal,
 )
-from PyQt6.QtGui import QAction, QActionGroup, QIcon, QImage, QPainter, QPixmap
+from PyQt6.QtGui import (
+    QAction,
+    QActionGroup,
+    QColor,
+    QIcon,
+    QImage,
+    QPainter,
+    QPainterPath,
+    QPixmap,
+    QRegion,
+)
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -79,6 +93,32 @@ CUT_MODELS = (
     "u2netp",
 )
 IMAGE_FILTER = "Images (*.jpg *.jpeg *.png *.bmp *.webp)"
+
+# Нативная обработка краёв безрамочного окна в Windows.
+WM_NCHITTEST = 0x0084
+_HT_EDGES = {
+    (-1, -1): 13,  # HTTOPLEFT
+    (-1, 0): 10,   # HTLEFT
+    (-1, 1): 16,   # HTBOTTOMLEFT
+    (0, -1): 12,   # HTTOP
+    (0, 1): 15,    # HTBOTTOM
+    (1, -1): 14,   # HTTOPRIGHT
+    (1, 0): 11,    # HTRIGHT
+    (1, 1): 17,    # HTBOTTOMRIGHT
+}
+
+
+class _WinMessage(ctypes.Structure):
+    _fields_ = [
+        ("hwnd", wintypes.HWND),
+        ("message", wintypes.UINT),
+        ("wParam", wintypes.WPARAM),
+        ("lParam", wintypes.LPARAM),
+        ("time", wintypes.DWORD),
+        ("pt", wintypes.POINT),
+    ]
+
+
 LEVEL_COLORS = {
     "OK": "#4ade80",
     "INFO": "#93c5fd",
@@ -90,6 +130,18 @@ LEVEL_COLORS = {
 def _icon(name: str) -> QIcon:
     enum = getattr(QStyle.StandardPixmap, name, None)
     return QApplication.style().standardIcon(enum) if enum is not None else QIcon()
+
+
+def _solid_icon(name: str, color: str) -> QIcon:
+    """Значок с фиксированной заливкой: не зависит от темы и виден на любом фоне."""
+    pixmap = _icon(name).pixmap(QSize(32, 32))
+    if pixmap.isNull():
+        return QIcon()
+    painter = QPainter(pixmap)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+    painter.fillRect(pixmap.rect(), QColor(color))
+    painter.end()
+    return QIcon(pixmap)
 
 
 class ImagePreview(QLabel):
@@ -264,6 +316,7 @@ class HoverOverlay(QFrame):
     def __init__(self, object_name: str):
         super().__init__()
         self.setObjectName(object_name)
+        self.can_reveal: callable | None = None
         self._effect = QGraphicsOpacityEffect(self)
         self.setGraphicsEffect(self._effect)
         self._effect.setOpacity(0.0)
@@ -276,6 +329,8 @@ class HoverOverlay(QFrame):
 
     def reveal(self) -> None:
         """Показать панель и отложить затухание на 5 секунд."""
+        if self.can_reveal is not None and not self.can_reveal():
+            return
         self._timer.stop()
         self._fade.stop()
         self._fade.setEndValue(1.0)
@@ -346,6 +401,7 @@ class PreviewArea(QFrame):
         self.tabs = tabs
         self.zoom_overlay = zoom_overlay
         self.nav_overlay = nav_overlay
+        self.can_interact: callable | None = None  # callable -> bool, есть ли загруженное фото
         self.image_rect_provider = None  # callable -> list[QRect] в координатах area
         for overlay in (zoom_overlay, nav_overlay):
             overlay.setParent(self)
@@ -402,16 +458,19 @@ class PreviewArea(QFrame):
 
     def eventFilter(self, obj, event) -> bool:
         if self._inside(obj):
+            allowed = self.can_interact is None or self.can_interact()
             if event.type() == QEvent.Type.MouseButtonPress:
                 button = event.button()
                 if button in (Qt.MouseButton.XButton1, Qt.MouseButton.XButton2):
-                    (self.prev_requested if button == Qt.MouseButton.XButton1
-                     else self.next_requested).emit()
+                    if allowed:
+                        (self.prev_requested if button == Qt.MouseButton.XButton1
+                         else self.next_requested).emit()
                     return True
             elif event.type() == QEvent.Type.Wheel:
-                steps = event.angleDelta().y() // 120
-                if steps:
-                    self.wheel_stepped.emit(steps)
+                if allowed:
+                    steps = event.angleDelta().y() // 120
+                    if steps:
+                        self.wheel_stepped.emit(steps)
                 return True
         return super().eventFilter(obj, event)
 
@@ -453,14 +512,10 @@ class MainWindow(QMainWindow):
         self.sliders: dict[str, tuple[QSlider, int, QLabel, str]] = {}
         self.previews: dict[str, tuple[ImagePreview, ...]] = {}
 
-        app = QApplication.instance()
-        if app is not None:
-            app.installEventFilter(self)
-        self._resize_data: tuple[list[str], QPoint, QRect] | None = None
-
         self._init_ui()
         self._connect_actions()
         self._load_settings()
+        self._center_on_screen()
         self._ui_ready = True
 
         self._log("OK", "Скелет окна готов. Откройте исходное фото через Файл → Открыть исходное фото.")
@@ -498,6 +553,10 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(main_splitter)
         self.statusBar().showMessage("Готово")
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        QTimer.singleShot(0, self._apply_rounded_corners)
 
     def _create_menu(self) -> None:
         # Кнопки управления окном — справа в той же строке, что и меню.
@@ -563,62 +622,86 @@ class MainWindow(QMainWindow):
             self.showMaximized()
             self.btn_maximize.setText("❐")
             self.btn_maximize.setToolTip("Восстановить")
+        self._apply_rounded_corners()
 
-    # ---------- безрамочное окно: перетаскивание и resize ----------
+    # ---------- безрамочное окно: нативный resize и скруглённые углы ----------
 
-    def _resize_edges(self, global_pos: QPoint) -> list[str]:
+    def nativeEvent(self, eventType, message):
+        """Нативное растягивание: сравниваем физические координаты Windows."""
+        if sys.platform == "win32" and eventType == b"windows_generic_MSG":
+            msg = _WinMessage.from_address(int(message))
+            if msg.message == WM_NCHITTEST and not self.isMaximized():
+                # lParam содержит ФИЗИЧЕСКИЕ экранные пиксели. mapFromGlobal()
+                # ожидает логические, поэтому при масштабе 150–300 % зона
+                # захвата уезжала внутрь окна. Берём физический rect из Windows.
+                rect = wintypes.RECT()
+                ctypes.windll.user32.GetWindowRect(
+                    wintypes.HWND(int(self.winId())), ctypes.byref(rect)
+                )
+                screen_x = ctypes.c_short(msg.lParam & 0xFFFF).value
+                screen_y = ctypes.c_short((msg.lParam >> 16) & 0xFFFF).value
+                margin = max(6, round(8 * self.devicePixelRatioF()))
+                horizontal = (
+                    -1 if screen_x <= rect.left + margin
+                    else 1 if screen_x >= rect.right - margin
+                    else 0
+                )
+                vertical = (
+                    -1 if screen_y <= rect.top + margin
+                    else 1 if screen_y >= rect.bottom - margin
+                    else 0
+                )
+                edge = _HT_EDGES.get((horizontal, vertical))
+                if edge is not None:
+                    return True, edge
+        # В PyQt6 6.12 вызов super().nativeEvent() из override падает с
+        # access violation; безопасно вернуть 「не обработано」 напрямую.
+        return False, 0
+
+    def _center_on_screen(self) -> None:
+        """Размещает окно по центру рабочей области, занимая 85 % её площади."""
+        screen = self.screen()
+        if screen is None:
+            return
+        area = screen.availableGeometry()
+        # Площадь 85 % => линейный масшта √(0.85) ≈ 0.922 по каждой стороне.
+        scale = math.sqrt(0.85)
+        width = max(self.minimumWidth(), round(area.width() * scale))
+        height = max(self.minimumHeight(), round(area.height() * scale))
+        x = area.left() + (area.width() - width) // 2
+        y = area.top() + (area.height() - height) // 2
+        self.setGeometry(x, y, width, height)
+
+    def _apply_rounded_corners(self) -> None:
         if self.isMaximized():
-            return []
-        pos = self.mapFromGlobal(global_pos)
-        edges = []
-        if pos.x() <= 6:
-            edges.append("left")
-        if pos.x() >= self.width() - 6:
-            edges.append("right")
-        if pos.y() <= 6:
-            edges.append("top")
-        if pos.y() >= self.height() - 6:
-            edges.append("bottom")
-        return edges
-
-    def eventFilter(self, obj, event) -> bool:
-        if not getattr(self, "_ui_ready", False):
-            return False
-        if isinstance(obj, QWidget) and obj.window() is not self:
-            return super().eventFilter(obj, event)
-        menu_bar = getattr(self, "_menu_bar", None)
-        on_menu = isinstance(obj, QWidget) and menu_bar is not None and (
-            obj is menu_bar or menu_bar.isAncestorOf(obj)
+            self.clearMask()
+            self._set_dwm_corners(False)
+            return
+        path = QPainterPath()
+        path.addRoundedRect(
+            QRectF(0, 0, self.width(), self.height()), 10, 10
         )
+        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
+        self._set_dwm_corners(True)
 
-        if event.type() == QEvent.Type.MouseButtonPress:
-            if event.button() == Qt.MouseButton.LeftButton and not on_menu:
-                edges = self._resize_edges(event.globalPosition().toPoint())
-                if edges:
-                    self._resize_data = (
-                        edges,
-                        event.globalPosition().toPoint(),
-                        QRect(self.geometry()),
-                    )
-                    return True
-        elif event.type() == QEvent.Type.MouseMove and self._resize_data:
-            edges, start, geometry = self._resize_data
-            delta = event.globalPosition().toPoint() - start
-            rect = QRect(geometry)
-            if "left" in edges:
-                rect.setLeft(geometry.left() + delta.x())
-            if "right" in edges:
-                rect.setRight(geometry.right() + delta.x())
-            if "top" in edges:
-                rect.setTop(geometry.top() + delta.y())
-            if "bottom" in edges:
-                rect.setBottom(geometry.bottom() + delta.y())
-            self.setGeometry(rect)
-            return True
-        elif event.type() == QEvent.Type.MouseButtonRelease and self._resize_data:
-            self._resize_data = None
-            return True
-        return super().eventFilter(obj, event)
+    def _set_dwm_corners(self, rounded: bool) -> None:
+        if sys.platform != "win32":
+            return
+        try:
+            # DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2, DWMWCP_DEFAULT = 0
+            value = ctypes.c_int(2 if rounded else 0)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                wintypes.HWND(int(self.winId())),
+                33,
+                ctypes.byref(value),
+                ctypes.sizeof(value),
+            )
+        except Exception:
+            pass  # старые версии Windows игнорируют атрибут
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_rounded_corners()
 
     def _create_toolbar(self) -> None:
         toolbar = QToolBar("Операции")
@@ -633,11 +716,13 @@ class MainWindow(QMainWindow):
             return act
 
         self.tb_open_source = action("Открыть фото", "SP_DialogOpenButton", "Выбрать исходное изображение")
-        self.tb_open_background = action("Выбрать фон", "SP_FileIcon", "Выбрать изображение фона")
+        self.tb_open_background = action("Выбрать фон", "SP_DialogOpenButton", "Выбрать изображение фона")
         toolbar.addSeparator()
         self.tb_cut = action("Вырезать", "SP_MediaPlay", "Вырезать объект (пока заглушка)")
+        self.tb_cut.setIcon(_solid_icon("SP_MediaPlay", "#16a34a"))
         self.tb_generate = action("Сгенерировать фон", "SP_BrowserReload", "Генерация фона (пока заглушка)")
         self.tb_upscale = action("Апскейл", "SP_ArrowUp", "Апскейл ×4 (пока заглушка)")
+        self.tb_upscale.setIcon(_solid_icon("SP_ArrowUp", "#0ea5e9"))
         self.tb_compose = action("Собрать", "SP_DialogApplyButton", "Собрать композит (пока заглушка)")
         toolbar.addSeparator()
         self.tb_stop = action("Стоп", "SP_BrowserStop", "Остановить операцию")
@@ -672,7 +757,7 @@ class MainWindow(QMainWindow):
         box = QVBoxLayout(source)
         self.lbl_source = self._path_label("Файл не выбран")
         box.addWidget(self.lbl_source)
-        self.btn_pick_source = QPushButton("Выбрать…")
+        self.btn_pick_source = QPushButton(_icon("SP_DialogOpenButton"), "Выбрать…")
         box.addWidget(self.btn_pick_source)
         form.addWidget(source)
 
@@ -681,7 +766,7 @@ class MainWindow(QMainWindow):
         box = QVBoxLayout(background)
         self.lbl_background = self._path_label("Файл не выбран")
         box.addWidget(self.lbl_background)
-        self.btn_pick_background = QPushButton("Выбрать…")
+        self.btn_pick_background = QPushButton(_icon("SP_DialogOpenButton"), "Выбрать…")
         box.addWidget(self.btn_pick_background)
         box.addWidget(QLabel("Промпт для генерации:"))
         self.prompt = QPlainTextEdit()
@@ -879,6 +964,9 @@ class MainWindow(QMainWindow):
 
         zoom_overlay = self.preview_area_controls.zoom_overlay
         nav_overlay = self.preview_area_controls.nav_overlay
+        self.preview_area_controls.can_interact = self._has_current_image
+        zoom_overlay.can_reveal = self._has_current_image
+        nav_overlay.can_reveal = self._has_current_image
         self.zoom_slider.valueChanged.connect(self._on_zoom_value)
         self.preview_area_controls.wheel_stepped.connect(zoom_overlay.reveal)
         self.preview_area_controls.wheel_stepped.connect(
@@ -888,6 +976,7 @@ class MainWindow(QMainWindow):
         )
         self.btn_fit_view.clicked.connect(lambda: self.zoom_slider.setValue(0))
         self.tabs.currentChanged.connect(self._sync_zoom_controls)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
         self.tabs.currentChanged.connect(self.preview_area_controls._place_zoom)
         self.tabs.currentChanged.connect(self.preview_area_controls.reposition_overlays)
         for previews in self.previews.values():
@@ -923,6 +1012,19 @@ class MainWindow(QMainWindow):
 
     # ---------- действия ----------
 
+    def _current_previews(self) -> tuple[ImagePreview, ...]:
+        return self.previews.get(self.tabs.tabText(self.tabs.currentIndex()), ())
+
+    def _has_current_image(self) -> bool:
+        """Функции доступны, только если в текущей вкладке есть изображение."""
+        return any(preview.source_pixmap() is not None for preview in self._current_previews())
+
+    def _on_tab_changed(self, index: int) -> None:
+        if not self._has_current_image():
+            area = self.preview_area_controls
+            area.zoom_overlay._hide()
+            area.nav_overlay._hide()
+
     def open_source(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Открыть исходное фото", str(DATA_DIR), IMAGE_FILTER)
         if not path:
@@ -956,6 +1058,8 @@ class MainWindow(QMainWindow):
         )
 
     def _cycle_background(self, delta: int) -> None:
+        if not self._has_current_image():
+            return
         files = self._bg_files()
         if not files:
             self._log("WARN", "В data\\bg нет изображений для перебора.")
@@ -984,13 +1088,22 @@ class MainWindow(QMainWindow):
             self._log("ERROR", f"Не удалось сохранить: {out}")
 
     def _on_zoom_value(self, value: int) -> None:
+        if not self._has_current_image():
+            blocker = QSignalBlocker(self.zoom_slider)
+            self.zoom_slider.setValue(0)
+            blocker.unblock()
+            return
         self._set_zoom_percent(value)
         if getattr(self, "_ui_ready", False):
             self.preview_area_controls.zoom_overlay.reveal()
 
     def _set_zoom_percent(self, value: int) -> None:
         """0 — исходный масштаб (вписать), −100 / +100 — вдвое меньше/больше."""
+        if not self._has_current_image():
+            return
         for preview in self.previews.get(self.tabs.tabText(self.tabs.currentIndex()), ()):
+            if preview.source_pixmap() is None:
+                continue
             if value == 0:
                 preview.set_zoom(0.0)
             else:
