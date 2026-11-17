@@ -1,4 +1,4 @@
-"""Функциональные тесты MainWindow: масштаб, навигация, темы и-oверлеи."""
+"""Функциональные тесты MainWindow: масштаб, сохранение, темы и оверлеи."""
 from __future__ import annotations
 
 import math
@@ -36,33 +36,15 @@ class TestMainWindow(GuiTestCase):
         )
         QApplication.sendEvent(self.area, event)
 
-    def send_side_button(self, button: Qt.MouseButton) -> None:
-        event = QMouseEvent(
-            QEvent.Type.MouseButtonPress, QPointF(10, 10), button, button,
-            Qt.KeyboardModifier.NoModifier,
-        )
-        QApplication.sendEvent(self.area, event)
-
-    def probe_interactions(self) -> tuple[int, int, int]:
-        """Имитирует колесо, боковую кнопку и движение ползунка."""
-        counts = {"wheel": 0, "prev": 0, "next": 0}
-        connections = (
-            self.area.wheel_stepped.connect(lambda _: counts.__setitem__("wheel", 1)),
-            self.area.prev_requested.connect(lambda: counts.__setitem__("prev", 1)),
-            self.area.next_requested.connect(lambda: counts.__setitem__("next", 1)),
-        )
+    def probe_interactions(self) -> tuple[int, int]:
+        """Имитирует колесо и движение ползунка масштаба."""
+        counts = {"wheel": 0}
+        connection = self.area.wheel_stepped.connect(lambda _: counts.__setitem__("wheel", 1))
         self.send_wheel()
-        self.send_side_button(Qt.MouseButton.XButton1)
         self.window.zoom_slider.setValue(50)
         self.process_events()
-        for signal, connection in zip(
-            (self.area.wheel_stepped, self.area.prev_requested, self.area.next_requested),
-            connections,
-            strict=True,
-        ):
-            signal.disconnect(connection)
-        value = self.window.zoom_slider.value()
-        return counts["wheel"], counts["prev"], value
+        self.area.wheel_stepped.disconnect(connection)
+        return counts["wheel"], self.window.zoom_slider.value()
 
     def load_current(self) -> None:
         index = self.window.tabs.currentIndex()
@@ -107,15 +89,14 @@ class TestMainWindow(GuiTestCase):
 
     def test_interactions_blocked_only_for_empty_current_tab(self) -> None:
         # Пустая вкладка.
-        self.assertEqual(self.probe_interactions(), (0, 0, 0))
+        self.assertEqual(self.probe_interactions(), (0, 0))
 
-        # Загруженный «Исходник», но пустые остальные вкладки. Проверяем их
-        # до активных проб: боковая кнопка меняет фон и заполняет вкладку «Фон».
+        # Загруженный «Исходник», но пустые остальные вкладки.
         self.load_current()
         for index, title in ((1, "Вырезка"), (2, "Фон"), (3, "Результат")):
             self.window.tabs.setCurrentIndex(index)
             with self.subTest(tab=title):
-                self.assertEqual(self.probe_interactions(), (0, 0, 0))
+                self.assertEqual(self.probe_interactions(), (0, 0))
         self.assertIsNone(self.window.background_path)
         self.assertIsNone(self.window.previews["Фон"][0].source_pixmap())
 
@@ -133,24 +114,21 @@ class TestMainWindow(GuiTestCase):
         self.window.tabs.setCurrentIndex(4)
         self.assertTrue(any(self.probe_interactions()))
 
-    def test_overlays_do_not_reveal_without_image(self) -> None:
-        for overlay in (self.area.zoom_overlay, self.area.nav_overlay):
-            overlay._timer.stop()
-            self.assertFalse(overlay.can_reveal())
-            overlay.reveal()
-            self.assertFalse(overlay._timer.isActive())
+    def test_zoom_overlay_hidden_without_image(self) -> None:
+        overlay = self.area.zoom_overlay
+        overlay._timer.stop()
+        self.assertFalse(overlay.can_reveal())
+        overlay.reveal()
+        self.assertFalse(overlay._timer.isActive())
 
         self.load_current()
-        for overlay in (self.area.zoom_overlay, self.area.nav_overlay):
-            self.assertTrue(overlay.can_reveal())
-            overlay.reveal()
-            self.assertTrue(overlay._timer.isActive())
+        self.assertTrue(overlay.can_reveal())
+        overlay.reveal()
+        self.assertTrue(overlay._timer.isActive())
 
-    def test_overlays_inside_preview_page(self) -> None:
+    def test_zoom_overlay_inside_preview_page(self) -> None:
         page = self.area._page_rect()
-        for overlay in (self.area.zoom_overlay, self.area.nav_overlay):
-            with self.subTest(overlay=overlay.objectName()):
-                self.assertTrue(page.contains(overlay.geometry()))
+        self.assertTrue(page.contains(self.area.zoom_overlay.geometry()))
 
     def test_pan_cursor_shapes(self) -> None:
         self.load_current()
@@ -172,9 +150,43 @@ class TestMainWindow(GuiTestCase):
         QApplication.sendEvent(preview, release)
         self.assertEqual(preview.cursor().shape(), Qt.CursorShape.OpenHandCursor)
 
+    def test_save_button_in_tab_row_disabled_for_source_and_empty_tabs(self) -> None:
+        button = self.window.btn_save_current
+        self.assertIs(self.window.tabs.cornerWidget(Qt.Corner.TopRightCorner), button)
+        self.assertFalse(button.isEnabled())
+
+        self.load_current()  # «Исходник» — сохранение не предусмотрено
+        self.process_events()
+        self.assertFalse(button.isEnabled())
+
+        for index, title in ((1, "Вырезка"), (2, "Фон"), (3, "Результат"), (4, "До — После")):
+            self.window.tabs.setCurrentIndex(index)
+            with self.subTest(tab=title):
+                self.assertFalse(button.isEnabled())
+
+    def test_save_button_enabled_only_for_intermediate_tabs_with_image(self) -> None:
+        button = self.window.btn_save_current
+        for index, title in ((1, "Вырезка"), (2, "Фон"), (3, "Результат")):
+            self.window.tabs.setCurrentIndex(index)
+            self.load_current()
+            self.process_events()
+            with self.subTest(tab=title):
+                self.assertTrue(button.isEnabled())
+
+        self.window.tabs.setCurrentIndex(4)
+        self.load_current()  # только левая половина «До — После»
+        self.assertFalse(button.isEnabled())
+        self.window.previews["До — После"][1].set_image(str(IMAGE))
+        self.process_events()
+        self.assertTrue(button.isEnabled())
+
+    def test_background_navigation_removed(self) -> None:
+        self.assertFalse(hasattr(self.window, "_cycle_background"))
+        self.assertFalse(hasattr(self.area, "nav_overlay"))
+
     def test_theme_switch_keeps_icon_colors(self) -> None:
         names = ("tb_open_source", "tb_open_background", "tb_cut", "tb_generate",
-                 "tb_upscale", "tb_compose", "tb_stop", "tb_save")
+                 "tb_upscale", "tb_compose", "tb_stop", "tb_save", "btn_save_current")
         self.window._apply_theme("Тёмная")
         self.process_events()
         before = {name: dominant_color(getattr(self.window, name).icon()) for name in names}
@@ -191,6 +203,7 @@ class TestMainWindow(GuiTestCase):
         self.assertEqual(after, before)
 
     def test_folder_icons_present(self) -> None:
-        for name in ("tb_open_source", "tb_open_background", "btn_pick_source", "btn_pick_background"):
+        for name in ("tb_open_source", "tb_open_background", "btn_pick_source",
+                     "btn_pick_background", "btn_save_current"):
             with self.subTest(name=name):
                 self.assertFalse(getattr(self.window, name).icon().isNull())

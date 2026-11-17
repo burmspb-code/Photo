@@ -44,6 +44,7 @@ _DARK = {
     "overlay_bg": "#1e293b",
     "overlay_border": "#475569",
     "overlay_text": "#cbd5e1",
+    "warning": "#f59e0b",
 }
 
 _LIGHT = {
@@ -88,6 +89,7 @@ _LIGHT = {
     "overlay_bg": "rgba(255, 255, 255, 235)",
     "overlay_border": "#cbd5e1",
     "overlay_text": "#334155",
+    "warning": "#b45309",
 }
 
 _STYLE = Template(
@@ -124,17 +126,33 @@ QFrame#previewArea {
     background: $preview_bg;
     border: 0;
 }
-QFrame#zoomBar, QFrame#navBar {
+QFrame#zoomBar {
     background: $overlay_bg;
     border: 1px solid $overlay_border;
     border-radius: 6px;
     color: $overlay_text;
 }
-QFrame#zoomBar QLabel, QFrame#navBar QLabel {
+QFrame#zoomBar QLabel {
     color: $overlay_text;
 }
-QFrame#zoomBar QPushButton, QFrame#navBar QPushButton {
-    padding: 2px 6px;
+QFrame#advisoryToast {
+    background: $overlay_bg;
+    border: 1px solid $warning;
+    border-radius: 6px;
+    color: $overlay_text;
+}
+QLabel#advisoryText {
+    color: $overlay_text;
+    font-size: 11px;
+}
+QPushButton#advisoryClose {
+    background: rgba(245, 158, 11, 30);
+    border: 1px solid $warning;
+    border-radius: 4px;
+    padding: 0;
+    color: $warning;
+    font-size: 15px;
+    font-weight: bold;
 }
 QScrollArea {
     background: $zone_bg;
@@ -283,6 +301,21 @@ QTabBar::tab:selected {
     border-color: $accent;
     color: $accent_text;
     font-weight: bold;
+}
+QPushButton#saveCurrent {
+    background: $button_bg;
+    border: 1px solid $button_border;
+    border-radius: 4px;
+    padding: 4px 8px;
+    margin: 2px 4px 2px 0;
+    color: $text;
+}
+QPushButton#saveCurrent:hover {
+    background: $button_hover;
+}
+QPushButton#saveCurrent:disabled {
+    color: $disabled;
+    border-color: $zone_bg;
 }
 QTextEdit#log {
     background: $log_bg;

@@ -25,10 +25,87 @@ def get_session(model=None):
     return _session
 
 
+def tiling_plan(H, W, tile=1024):
+    """Позиции тайлов, покрывающие кадр целиком.
+
+    Для кадров до ``2 * tile`` на сторону сохраняется старая схема ровно двух
+    тайлов — она даёт побайтово тот же результат, что и утверждённая вырезка.
+    Для больших кадров строится сетка с шагом ``tile // 2`` (50 % перекрытия);
+    последний тайл всегда прижимается к краю, чтобы не оставалось непокрытых
+    полос.
+    """
+    def axis(size: int) -> list[int]:
+        if size <= tile:
+            return [0]
+        last = size - tile
+        if last <= tile:
+            return [0, last]  # унаследованное поведение: 2 тайла с перекрытием
+        stride = max(1, tile // 2)
+        pos = list(range(0, last + 1, stride))
+        if pos[-1] != last:
+            if last - pos[-1] < stride // 2:
+                pos[-1] = last  # почти дубль — сдвигаем последний тайл к краю
+            else:
+                pos.append(last)
+        return pos
+
+    return axis(W), axis(H)
+
+
+def cut_advisory(src, tile=1024) -> list[str]:
+    """Предупреждения о кадре, где автоматическая вырезка может быть плохой."""
+    img = _read(src)
+    if img is None:
+        return []
+    h, w = img.shape[:2]
+    xs, ys = tiling_plan(h, w, tile)
+    notes = []
+    if len(xs) * len(ys) > 4:
+        notes.append(
+            f"Большой кадр {w}×{h}: вырезка пойдёт {len(xs)}×{len(ys)} = "
+            f"{len(xs) * len(ys)} тайлами — проверьте швы между ними."
+        )
+    gray = cv2.cvtColor(img[:, :, :3], cv2.COLOR_BGR2GRAY)
+    contrast = float(gray.std())
+    if contrast < 45:
+        notes.append(
+            f"Низкий контраст (σ={contrast:.0f}): модель может захватить фон. "
+            "Проверьте результат; при необходимости обрежьте кадр вокруг объекта."
+        )
+    return notes
+
+
+def _tile_with_context(orig, x0, y0, x1, y1, tile, sess):
+    """Повторная сегментация тайла с захватом соседних областей.
+
+    Тайл без объекта иногда сегментируется целиком как передний план: модель
+    не видит ни одного фрагмента объекта в кадре и возвращает почти сплошную маску.
+    Добавляем по ``tile // 2`` пикселей вокруг, прогоняем модель и вырезаем
+    исходную область — соседние части объекта дают модели нужный контекст.
+    """
+    H, W = orig.shape[:2]
+    pad = tile // 2
+    cx0, cy0 = max(0, x0 - pad), max(0, y0 - pad)
+    cx1, cy1 = min(W, x1 + pad), min(H, y1 + pad)
+    crop = orig[cy0:cy1, cx0:cx1]
+    ch, cw = crop.shape[:2]
+    scale = min(1.0, tile / max(ch, cw))
+    if scale < 1.0:
+        small = cv2.resize(crop, (max(1, int(cw * scale)), max(1, int(ch * scale))),
+                           interpolation=cv2.INTER_AREA)
+    else:
+        small = crop
+    buf = cv2.imencode(".png", small)[1]
+    raw = remove(buf.tobytes(), session=sess, alpha_matting=False)
+    alpha = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_UNCHANGED)[:, :, 3]
+    if scale < 1.0:
+        alpha = cv2.resize(alpha, (cw, ch), interpolation=cv2.INTER_LINEAR)
+    return alpha[y0 - cy0:y1 - cy0, x0 - cx0:x1 - cx0].astype(np.float32) / 255.0
+
+
 def tiled_alpha(orig, tile=1024, model=None, progress=None, cancelled=None):
     H, W = orig.shape[:2]
-    xs = [0, W - tile] if W > tile else [0]
-    ys = [0, H - tile] if H > tile else [0]
+    xs, ys = tiling_plan(H, W, tile)
     acc = np.zeros((H, W), np.float32)
     wsum = np.zeros((H, W), np.float32)
     sess = get_session(model)
@@ -46,6 +123,9 @@ def tiled_alpha(orig, tile=1024, model=None, progress=None, cancelled=None):
             a = cv2.imdecode(np.frombuffer(remove(buf.tobytes(), session=sess, alpha_matting=False), np.uint8),
                              cv2.IMREAD_UNCHANGED)[:, :, 3].astype(np.float32) / 255.0
             a = a[:th, :tw]
+            if float((a > 0.5).mean()) > 0.9:
+                # Почти сплошная маска — модель не нашла объект в этом тайле.
+                a = _tile_with_context(orig, x0, y0, x1, y1, tile, sess)
             wgt = np.maximum(np.outer(np.hanning(max(th, 2)), np.hanning(max(tw, 2))).astype(np.float32), 1e-3)
             acc[y0:y1, x0:x1] += a * wgt
             wsum[y0:y1, x0:x1] += wgt
