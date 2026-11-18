@@ -1370,8 +1370,16 @@ class MainWindow(QMainWindow):
             )
         return "Соберите композит — фон и вырезка готовы."
 
+    def _hints_enabled(self) -> bool:
+        """Подсказки в инфоокне можно отключить в Настройках → Общие."""
+        return self.settings.value("ui/hints", APP_DEFAULTS["ui/hints"], type=bool)
+
     def _update_hint(self) -> None:
         """Писать совет в инфоокно только при изменении состояния."""
+        if not self._hints_enabled():
+            # При повторном включении текущий совет должен появиться заново.
+            self._last_hint = None
+            return
         if self._busy:
             return
         hint = self._next_hint()

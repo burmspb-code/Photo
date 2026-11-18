@@ -41,6 +41,8 @@ APP_DEFAULTS: dict[str, object] = {
     "bg/size": "2K",
     # Апскейл: ×2 — EDSR (быстрый, сохраняет мелкие детали), ×4 — Real-ESRGAN.
     "upscale/factor": 2,
+    # Подсказки о следующем шаге в нижнем инфоокне можно отключить.
+    "ui/hints": True,
 }
 
 

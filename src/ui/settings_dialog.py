@@ -272,6 +272,11 @@ class SettingsDialog(QDialog):
         form = QFormLayout(page)
         self._add(form, "ui/language", "Язык", self._combo(["Русский"]), "Русский")
         self._add(form, "ui/log_level", "Уровень лога", self._combo(["INFO", "WARN", "ERROR", "DEBUG"]), "INFO")
+        hints = self._add(
+            form, "ui/hints", "Подсказки в инфоокне", QCheckBox(),
+            APP_DEFAULTS["ui/hints"],
+        )
+        hints.setToolTip("Советы о следующем шаге в нижнем окне сообщений ([HINT])")
         reset = QPushButton("Сбросить настройки")
         reset.clicked.connect(self._reset)
         form.addRow(reset)

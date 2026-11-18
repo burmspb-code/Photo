@@ -33,6 +33,25 @@ class TestSettingsDialog(GuiTestCase):
         dialog = SettingsDialog()
         self.assertEqual(dialog.controls["upscale/factor"].currentData(), 4)
 
+    def test_hints_checkbox_saves_and_main_window_honors_it(self) -> None:
+        dialog = SettingsDialog()
+        checkbox = dialog.controls["ui/hints"]
+        self.assertTrue(checkbox.isChecked())
+        checkbox.setChecked(False)
+        dialog._save()
+        self.assertIs(app_settings().value("ui/hints", type=bool), False)
+
+        dialog = SettingsDialog()
+        self.assertFalse(dialog.controls["ui/hints"].isChecked())
+
+        window = MainWindow()
+        try:
+            self.assertNotIn("[HINT]", window.log_display.toPlainText())
+        finally:
+            window.close()
+            window.deleteLater()
+            self.process_events()
+
     def test_main_window_reads_upscale_factor(self) -> None:
         stored = app_settings()
         stored.setValue("upscale/factor", 4)

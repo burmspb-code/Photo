@@ -17,6 +17,7 @@ class TestInfoHints(GuiTestCase):
         self.dir = Path(self._tmp.name)
         stored = app_settings()
         stored.remove("upscale/factor")
+        stored.remove("ui/hints")
         stored.sync()
         self.window = MainWindow()
         self.window.show()
@@ -105,6 +106,18 @@ class TestInfoHints(GuiTestCase):
 
         self.window._set_background(self._image("new-park.jpg", 2048, 1536))
         self.assertIn("соберите композит заново", self.last_hint())
+
+    def test_hints_can_be_disabled_and_reenabled(self) -> None:
+        self.window.settings.setValue("ui/hints", False)
+        self.window._update_hint()
+        count = len(self.hints())
+
+        self._ready()
+        self.assertEqual(len(self.hints()), count)
+
+        self.window.settings.setValue("ui/hints", True)
+        self.window._update_hint()
+        self.assertIn("апскейл ×2", self.last_hint())
 
     def test_no_hint_is_written_while_busy(self) -> None:
         count = len(self.hints())
