@@ -1,7 +1,7 @@
 """Промпт — подсказка при старте, а не текст прошлой генерации."""
 from __future__ import annotations
 
-from src.ui.defaults import PROMPT_PLACEHOLDER, apply_default_presets
+from src.ui.defaults import DEFAULTS_VERSION, PROMPT_PLACEHOLDER, apply_default_presets
 from src.ui.main_window import MainWindow
 from src.ui.settings_dialog import SettingsDialog
 from tests.gui_case import GuiTestCase, app_settings
@@ -58,7 +58,7 @@ class TestPromptPlaceholder(GuiTestCase):
 
     def test_migration_drops_legacy_prompt_without_other_changes(self) -> None:
         stored = app_settings()
-        stored.setValue("app/defaults_version", 1)
+        stored.setValue("app/defaults_version", DEFAULTS_VERSION)
         stored.setValue("cut/model", "birefnet-portrait")
         stored.sync()
 

@@ -181,6 +181,17 @@ class TestGuiOperations(GuiTestCase):
             self.window.tabs.tabText(self.window.tabs.currentIndex()), "Исходник"
         )
 
+    def test_open_background_activates_background_tab(self) -> None:
+        self.window.tabs.setCurrentIndex(0)  # «Исходник»
+        image = self._image("bg-pick.png")
+        with patch("src.ui.main_window.QFileDialog.getOpenFileName",
+                   return_value=(str(image), "")):
+            self.window.open_background()
+        self.process_events()
+        self.assertEqual(
+            self.window.tabs.tabText(self.window.tabs.currentIndex()), "Фон"
+        )
+
     def test_dialog_start_dir_falls_back_when_folder_is_gone(self) -> None:
         self.window.settings.setValue("paths/last_source_dir", str(self.dir / "gone"))
         self.assertEqual(
@@ -385,6 +396,39 @@ class TestGuiOperations(GuiTestCase):
         self.assertIsNone(self.window._worker)
         self.assertIn("выберите фон", self.window.log_display.toPlainText())
 
+    def test_upscale_large_preview_warns_in_toast_and_log(self) -> None:
+        big = self.dir / "big-4x.jpg"
+        _write(big, np.zeros((2200, 4300, 3), np.uint8))
+        self.window.background_path = self._image("bg.jpg")
+        self.window.tabs.setCurrentIndex(0)  # сборка не из вкладки «Фон»
+        with patch("src.ui.main_window.upscale_task", return_value=str(big)) as task:
+            self.window.tb_upscale.trigger()
+            self._finish()
+        self.assertEqual(task.call_args.kwargs["options"], {"factor": 2})
+        self.process_events()
+
+        toast = self.window.advisory_toast
+        self.assertFalse(toast.isHidden())
+        text = toast.label.text()
+        self.assertIn("⚠", text)
+        self.assertIn("Превью уменьшено", text)
+        self.assertIn("4300×2200 → 4096×2096", text)
+
+        log = self.window.log_display.toPlainText()
+        self.assertIn(text.removeprefix("⚠ "), log)  # тост продублирован в лог
+        self.assertIn("[WARN]", log)
+        self.assertEqual(self.window.tabs.tabText(self.window.tabs.currentIndex()), "Фон")
+
+    def test_upscale_small_preview_does_not_warn(self) -> None:
+        small = self._image("small-4x.jpg")
+        self.window.background_path = self._image("bg.jpg")
+        with patch("src.ui.main_window.upscale_task", return_value=str(small)):
+            self.window.tb_upscale.trigger()
+            self._finish()
+        self.process_events()
+        self.assertTrue(self.window.advisory_toast.isHidden())
+        self.assertNotIn("Превью уменьшено", self.window.log_display.toPlainText())
+
     def test_compose_requires_cutout(self) -> None:
         self.window.source_path = IMAGE
         self.window.background_path = self._image("bg.jpg")
@@ -399,6 +443,7 @@ class TestGuiOperations(GuiTestCase):
         self.window.source_path = IMAGE
         self.window.background_path = self._image("bg.jpg")
         self.window.previews["До — После"][0].set_image(IMAGE)
+        self.window.tabs.setCurrentIndex(2)  # сборку запускаем не из вкладки результата
         with (
             patch("src.ui.main_window.CUTOUT_FILE", cut),
             patch("src.ui.main_window.compose_task", return_value=str(result)),

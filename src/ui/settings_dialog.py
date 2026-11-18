@@ -70,6 +70,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._cut_tab(), "Вырезка")
         tabs.addTab(self._background_tab(), "Фон")
         tabs.addTab(self._compose_tab(), "Композит")
+        tabs.addTab(self._upscale_tab(), "Апскейл")
         tabs.addTab(self._paths_tab(), "Пути")
         tabs.addTab(self._common_tab(), "Общие")
         layout.addWidget(tabs)
@@ -155,10 +156,6 @@ class SettingsDialog(QDialog):
         cut = QGroupBox("Локальные модели")
         form = QFormLayout(cut)
         self._add(form, "cut/model", "Модель вырезки", self._combo(CUT_MODELS), CUT_MODELS[0])
-        self._add(
-            form, "models/upscale", "Модель апскейла",
-            self._combo(["realesr-general-x4v3", "—"]), "realesr-general-x4v3",
-        )
         layout.addWidget(cut)
 
         cloud = QGroupBox("Фон (провайдер API)")
@@ -181,7 +178,8 @@ class SettingsDialog(QDialog):
         status = QGroupBox("Статус")
         form = QFormLayout(status)
         form.addRow("birefnet-general:", QLabel("кэш rembg, ~928 МБ"))
-        form.addRow("realesr-general-x4v3:", QLabel("models\\, 4,6 МБ"))
+        form.addRow("edsr-x2:", QLabel("models\\, 5,5 МБ (апскейл ×2)"))
+        form.addRow("realesr-general-x4v3:", QLabel("models\\, 4,6 МБ (апскейл ×4)"))
         form.addRow("faceparser:", QLabel("models\\, 50,7 МБ (в задаче не используется)"))
         layout.addWidget(status)
         layout.addStretch()
@@ -234,6 +232,24 @@ class SettingsDialog(QDialog):
         self._add(form, "compose/seed", "Seed", self._spin(0, 999999), 7)
         return page
 
+    def _upscale_tab(self) -> QWidget:
+        page = QWidget()
+        form = QFormLayout(page)
+        combo = QComboBox()
+        combo.addItem("×2 — EDSR (быстро, мелкие детали)", 2)
+        combo.addItem("×4 — Real-ESRGAN (утверждённый стиль)", 4)
+        self._add(form, "upscale/factor", "Кратность", combo, APP_DEFAULTS["upscale/factor"])
+        note = QLabel(
+            "×2 — EDSR (5,5 МБ): быстрее и лучше сохраняет мелкие детали; "
+            "рекомендуемый режим.\n"
+            "×4 — realesr-general-x4v3 (4,6 МБ): стиль утверждённого результата.\n"
+            "На этом кадре ×2 увеличивает стороны исходника вдвое, ×4 — вчетверо.\n"
+            "Внутренняя обработка фонов использует ×4 независимо от этой настройки."
+        )
+        note.setWordWrap(True)
+        form.addRow(note)
+        return page
+
     def _paths_tab(self) -> QWidget:
         page = QWidget()
         form = QFormLayout(page)
@@ -267,7 +283,14 @@ class SettingsDialog(QDialog):
             if isinstance(widget, QCheckBox):
                 widget.setChecked(self.settings.value(key, default, type=bool))
             elif isinstance(widget, QComboBox):
-                index = widget.findText(str(self.settings.value(key, default)))
+                value = self.settings.value(key, default)
+                if widget.itemData(0) is None:
+                    index = widget.findText(str(value))
+                else:
+                    try:
+                        index = widget.findData(int(value))
+                    except (TypeError, ValueError):
+                        index = -1
                 if index >= 0:
                     widget.setCurrentIndex(index)
             elif isinstance(widget, QDoubleSpinBox):
@@ -290,8 +313,12 @@ class SettingsDialog(QDialog):
                 continue  # одноразовый ввод, не настройка
             if isinstance(widget, QCheckBox):
                 value = widget.isChecked()
-            elif isinstance(widget, (QComboBox, QLabel)):
-                value = widget.currentText() if isinstance(widget, QComboBox) else widget.text()
+            elif isinstance(widget, QComboBox):
+                # Combo с данными (кратность апскейла) сохраняет число, а не подпись.
+                data = widget.currentData()
+                value = data if data is not None else widget.currentText()
+            elif isinstance(widget, QLabel):
+                value = widget.text()
             elif isinstance(widget, (QSpinBox, QDoubleSpinBox)):
                 value = widget.value()
             elif isinstance(widget, QPlainTextEdit):

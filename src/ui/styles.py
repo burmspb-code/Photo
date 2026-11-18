@@ -124,6 +124,10 @@ QLabel#zoneTitle {
 QLabel#pathLabel {
     color: $path_text;
 }
+QLabel#previewInfo {
+    color: $path_text;
+    font-size: 11px;
+}
 QLabel#preview {
     background: $preview_bg;
     border: 1px solid $preview_border;

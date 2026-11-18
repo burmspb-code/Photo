@@ -18,6 +18,9 @@ import sys
 from ctypes import wintypes
 from pathlib import Path
 
+import cv2
+import numpy as np
+
 from PyQt6.QtCore import (
     Qt,
     QEvent,
@@ -36,8 +39,10 @@ from PyQt6.QtGui import (
     QAction,
     QActionGroup,
     QColor,
+    QFontMetrics,
     QIcon,
     QImage,
+    QImageReader,
     QPainter,
     QPainterPath,
     QPalette,
@@ -74,6 +79,8 @@ from PyQt6.QtWidgets import (
 )
 
 from src.core.cutout import cut_advisory
+from src.core.image import _read, _write
+from src.core.settings import normalize_factor
 from src.core.tasks import CUTOUT_FILE, compose_task, cut_task, genbg_task, upscale_task
 
 from .about_dialog import AboutDialog
@@ -166,6 +173,128 @@ def _solid_icon(name: str, color: str) -> QIcon:
     return QIcon(pixmap)
 
 
+MAX_PREVIEW_SIDE = 4096  # QPixmap большего размера падает даже при успешном QImage
+
+
+def _preview_downscale(path: str | Path) -> tuple[tuple[int, int], tuple[int, int]] | None:
+    """Размеры (было → стало), если превью было уменьшено; иначе None.
+
+    ``QImageReader.size()`` читает только заголовок, поэтому работает и для
+    кадров, которые ``QImage`` не декодирует из-за лимита аллокации.
+    """
+    size = QImageReader(str(path)).size()
+    if not size.isValid():
+        return None
+    original = (size.width(), size.height())
+    if max(original) <= MAX_PREVIEW_SIDE:
+        return None
+    factor = MAX_PREVIEW_SIDE / max(original)
+    preview = (max(1, round(original[0] * factor)), max(1, round(original[1] * factor)))
+    return original, preview
+
+
+def _image_info(path: str | Path) -> tuple[str, str]:
+    """Подпись «имя · WxH» и tooltip с путём и весом файла.
+
+    Разрешение читается из заголовка файла через ``QImageReader.size()``, а не
+    из уменьшенного превью: окно показывает копию до ``MAX_PREVIEW_SIDE``, но
+    подпись должна сообщать настоящий размер файла на диске.
+    """
+    file = Path(path)
+    size = QImageReader(str(file)).size()
+    resolution = (
+        f"{size.width()}×{size.height()}" if size.isValid() else "размер неизвестен"
+    )
+    label = f"{file.name} · {resolution}"
+    try:
+        mb = file.stat().st_size / (1024 * 1024)
+        weight = f"{mb:.1f} МБ".replace(".", ",")
+    except OSError:
+        weight = "недоступен"
+    return label, f"{file}\n{resolution} · {weight}"
+
+
+def _scaled_qimage(image: QImage) -> QImage:
+    """Уменьшить кадр для превью, сохраняя пропорции."""
+    side = max(image.width(), image.height())
+    if side <= MAX_PREVIEW_SIDE:
+        return image
+    factor = MAX_PREVIEW_SIDE / side
+    return image.scaled(
+        max(1, round(image.width() * factor)),
+        max(1, round(image.height() * factor)),
+        Qt.AspectRatioMode.IgnoreAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+
+
+def _load_qimage(path: str) -> QImage:
+    """Прочитать картинку для превью, обойдя лимит аллокации Qt.
+
+    ``QImage(path)`` молча возвращает пустой объект, если декодированное
+    изображение больше лимита ``QImageReader`` (по умолчанию 256 МБ). Такое
+    бывает после апскейла ×4: 3840×2160 → 15360×8640. ``cv2.imdecode`` этого
+    лимита не имеет, поэтому тяжёлые кадры читаем через него. В любом случае
+    превью уменьшается до ``MAX_PREVIEW_SIDE``: ``QPixmap`` на 15360×8640
+    приводит к падению процесса. Полный размер сохраняется из исходного файла.
+    """
+    image = QImage(path)
+    if not image.isNull():
+        return _scaled_qimage(image)
+    try:
+        bgr = _read(path)
+    except Exception:  # битый или недоступный файл — вернём пустой QImage
+        return QImage()
+    if bgr is None or bgr.ndim != 3 or bgr.shape[2] not in (3, 4):
+        return QImage()
+    height, width = bgr.shape[:2]
+    scale = min(1.0, MAX_PREVIEW_SIDE / max(height, width))
+    if scale < 1.0:
+        bgr = cv2.resize(
+            bgr, (max(1, round(width * scale)), max(1, round(height * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+        height, width = bgr.shape[:2]
+    if bgr.shape[2] == 4:
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGRA2RGBA)
+        fmt, bytes_per_line = QImage.Format.Format_RGBA8888, width * 4
+    else:
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        fmt, bytes_per_line = QImage.Format.Format_RGB888, width * 3
+    return QImage(rgb.data, width, height, bytes_per_line, fmt).copy()
+
+
+def _combine_full_res(before_path: str | Path, after_path: str | Path) -> np.ndarray | None:
+    """Соединить «До — После» в полном размере; None, если файл не читается."""
+    before, after = _read(before_path), _read(after_path)
+    if before is None or after is None:
+        return None
+
+    def to_bgr(img: np.ndarray) -> np.ndarray:
+        if img.ndim == 2:
+            return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        if img.shape[2] == 4:  # наложить альфу на белый, как делает QPainter
+            alpha = img[:, :, 3:4].astype(np.float32) / 255.0
+            rgb = img[:, :, :3].astype(np.float32) * alpha + 255.0 * (1.0 - alpha)
+            return rgb.astype(np.uint8)
+        return img[:, :, :3]
+
+    before, after = to_bgr(before), to_bgr(after)
+    height = max(before.shape[0], after.shape[0])
+
+    def fit(img: np.ndarray) -> np.ndarray:
+        h, w = img.shape[:2]
+        width = max(1, round(w * height / h))
+        return cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
+
+    left, right = fit(before), fit(after)
+    gap = 6
+    combined = np.full((height, left.shape[1] + gap + right.shape[1], 3), 255, dtype=np.uint8)
+    combined[:, :left.shape[1]] = left
+    combined[:, left.shape[1] + gap:] = right
+    return combined
+
+
 class ImagePreview(QLabel):
     """Превью с масштабированием и панорамированием перетаскиванием."""
 
@@ -174,6 +303,7 @@ class ImagePreview(QLabel):
     def __init__(self, placeholder: str = "Изображение не загружено"):
         super().__init__(placeholder)
         self._source: QPixmap | None = None
+        self._source_path: str | None = None
         self._scaled: QPixmap | None = None
         self._zoom = 0.0  # 0 = вписать в виджет
         self._offset = QPoint(0, 0)
@@ -186,11 +316,12 @@ class ImagePreview(QLabel):
         self.setMouseTracking(True)
 
     def set_image(self, path: str | Path) -> bool:
-        image = QImage(str(path))
+        image = _load_qimage(str(path))
         if image.isNull():
             self.clear_image("Не удалось прочитать изображение")
             return False
         self._source = QPixmap.fromImage(image)
+        self._source_path = str(path)  # полный размер берём из файла при сохранении
         self._reset_view()
         self._rescale()
         self.moved.emit()
@@ -198,6 +329,7 @@ class ImagePreview(QLabel):
 
     def clear_image(self, text: str | None = None) -> None:
         self._source = None
+        self._source_path = None
         self._scaled = None
         self._drag_origin = None
         self.unsetCursor()
@@ -206,8 +338,12 @@ class ImagePreview(QLabel):
         self.moved.emit()
 
     def source_pixmap(self) -> QPixmap | None:
-        """Оригинальное изображение — для сохранения результата."""
+        """Превью (может быть уменьшено) — для отображения и фолбэка сохранения."""
         return self._source
+
+    def source_path(self) -> str | None:
+        """Путь к исходному файлу в полном размере."""
+        return self._source_path
 
     @property
     def zoom(self) -> float:
@@ -327,6 +463,31 @@ class ImagePreview(QLabel):
         super().resizeEvent(event)
         self._rescale()
         self.moved.emit()
+
+
+class ElidedLabel(QLabel):
+    """Подпись, сокращающая середину: имя и расширение остаются видимыми."""
+
+    def __init__(self, text: str = "") -> None:
+        super().__init__()
+        self._full_text = text
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMinimumWidth(0)
+        self._elide()
+
+    def setText(self, text: str) -> None:
+        self._full_text = text
+        self._elide()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._elide()
+
+    def _elide(self) -> None:
+        text = QFontMetrics(self.font()).elidedText(
+            self._full_text, Qt.TextElideMode.ElideMiddle, max(1, self.width())
+        )
+        super().setText(text)
 
 
 class HoverOverlay(QFrame):
@@ -804,7 +965,8 @@ class MainWindow(QMainWindow):
         self.tb_cut = action("Вырезать", "SP_MediaPlay", "Вырезать объект")
         self.tb_cut.setIcon(_solid_icon("SP_MediaPlay", "#16a34a"))
         self.tb_generate = action("Сгенерировать фон", "SP_BrowserReload", "Генерация фона")
-        self.tb_upscale = action("Апскейл", "SP_ArrowUp", "Апскейл ×4 выбранного фона")
+        self.tb_upscale = action("Апскейл", "SP_ArrowUp",
+                                 f"Апскейл ×{self._upscale_factor()} выбранного фона")
         self.tb_upscale.setIcon(_solid_icon("SP_ArrowUp", "#0ea5e9"))
         self.tb_compose = action("Собрать", "SP_DialogApplyButton", "Собрать композит")
         toolbar.addSeparator()
@@ -898,7 +1060,10 @@ class MainWindow(QMainWindow):
         title.setObjectName("zoneTitle")
         header = QHBoxLayout()
         header.addWidget(title)
-        header.addStretch()
+        # Имя и разрешение активной вкладки: обновляется вместе с превью.
+        self.preview_info = ElidedLabel()
+        self.preview_info.setObjectName("previewInfo")
+        header.addWidget(self.preview_info)
         self.btn_fit_view = QPushButton("Вписать")
         header.addWidget(self.btn_fit_view)
         layout.addLayout(header)
@@ -1078,15 +1243,18 @@ class MainWindow(QMainWindow):
         self.tabs.currentChanged.connect(self._on_tab_changed)
         self.tabs.currentChanged.connect(self.preview_area_controls._place_zoom)
         self.tabs.currentChanged.connect(self.preview_area_controls.reposition_overlays)
+        self.tabs.currentChanged.connect(self._update_preview_info)
         for previews in self.previews.values():
             for preview in previews:
                 preview.moved.connect(self.preview_area_controls.reposition_overlays)
                 preview.moved.connect(self._update_tab_actions)
+                preview.moved.connect(self._update_preview_info)
 
         self.btn_clear_current.clicked.connect(self.clear_current)
         self.btn_save_current.clicked.connect(self.save_current)
         self.tabs.currentChanged.connect(self._update_tab_actions)
         self._update_tab_actions()
+        self._update_preview_info()
 
         self.tb_open_source.triggered.connect(self.open_source)
         self.tb_open_background.triggered.connect(self.open_background)
@@ -1136,6 +1304,20 @@ class MainWindow(QMainWindow):
         self.btn_clear_current.setVisible(name in SAVE_TABS)
         self.btn_clear_current.setEnabled(active and self._can_clear_current())
         self.btn_save_current.setEnabled(active and self._can_save_current())
+
+    def _update_preview_info(self, *_args) -> None:
+        """Имя и настоящее разрешение файлов активной вкладки в шапке зоны."""
+        name = self.tabs.tabText(self.tabs.currentIndex())
+        parts: list[str] = []
+        tips: list[str] = []
+        for preview in self.previews.get(name, ()):
+            path = preview.source_path()
+            if path:
+                label, tip = _image_info(path)
+                parts.append(label)
+                tips.append(tip)
+        self.preview_info.setText("  →  ".join(parts))
+        self.preview_info.setToolTip("\n\n".join(tips))
 
     def _on_tab_changed(self, index: int) -> None:
         if self.tabs.tabText(index) != "Исходник":
@@ -1194,20 +1376,24 @@ class MainWindow(QMainWindow):
             self.settings.setValue("paths/last_bg_dir", str(Path(path).parent))
             self._set_background(Path(path))
 
-    def _set_background(self, path: Path, quiet: bool = False) -> None:
+    def _set_background(self, path: Path, quiet: bool = False) -> bool:
         """Фон выбирается один раз: диалогом, генерацией или апскейлом."""
         if not self.previews["Фон"][0].set_image(path):
-            return
+            self._log("ERROR", f"Не удалось показать фон {path}.")
+            return False
         self.background_path = path
         self.lbl_background.setText(str(path))
         if not quiet:
             self._log("OK", f"Фон: {path}")
         self._update_tab_actions()
+        self._activate_tab("Фон")
+        return True
 
     def open_settings(self) -> None:
         dialog = SettingsDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._load_settings()
+            self.tb_upscale.setToolTip(f"Апскейл ×{self._upscale_factor()} выбранного фона")
             self._log("OK", "Настройки сохранены.")
             if dialog.generate_requested:
                 # Промпт из диалога одноразовый: переносим его в панель только
@@ -1220,15 +1406,47 @@ class MainWindow(QMainWindow):
     def open_about(self) -> None:
         AboutDialog(self, dark=self._theme_name == "Тёмная").exec()
 
+    def _save_preview_full(self, preview: ImagePreview, path: Path, fmt: str) -> bool:
+        """Сохранить полный размер из файла; фолбэк — уменьшенное превью."""
+        src = preview.source_path()
+        if src and Path(src).exists() and path.suffix.lower() in {".png", ".jpg", ".jpeg"}:
+            try:
+                img = _read(src)
+            except Exception:
+                img = None
+            if img is not None:
+                _write(path, img)
+                return True
+        pixmap = preview.source_pixmap()
+        return pixmap is not None and pixmap.save(str(path), fmt, 92)
+
+    def _save_tab_full(self, tab: str, path: Path, fmt: str) -> bool:
+        previews = self.previews[tab]
+        if tab == "До — После":
+            before, after = (p.source_path() for p in previews)
+            if (before and after and Path(before).exists() and Path(after).exists()
+                    and path.suffix.lower() in {".png", ".jpg", ".jpeg"}):
+                try:
+                    combined = _combine_full_res(before, after)
+                except Exception:
+                    combined = None
+                if combined is not None:
+                    _write(path, combined)
+                    return True
+            pixmap = self._combine_side_by_side(
+                previews[0].source_pixmap(), previews[1].source_pixmap()
+            )
+            return pixmap.save(str(path), fmt, 92)
+        return self._save_preview_full(previews[0], path, fmt)
+
     def save_result(self) -> None:
         preview = self.previews["Результат"][0]
-        pixmap = preview.source_pixmap()
-        if pixmap is None:
+        if preview.source_pixmap() is None:
             self._log("WARN", "Нет результата для сохранения — сначала соберите композит.")
             return
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         out = DATA_DIR / "result.jpg"
-        if pixmap.save(str(out), "JPG", 92):
+        if self._save_preview_full(preview, out, "JPG"):
             self._log("OK", f"JPEG сохранён: {out}")
             self.statusBar().showMessage(f"Сохранено: {out}", 5000)
         else:
@@ -1258,14 +1476,6 @@ class MainWindow(QMainWindow):
         painter.end()
         return combined
 
-    def _save_pixmap(self, tab: str) -> QPixmap | None:
-        previews = self.previews[tab]
-        if tab == "До — После":
-            return self._combine_side_by_side(
-                previews[0].source_pixmap(), previews[1].source_pixmap()
-            )
-        return previews[0].source_pixmap()
-
     def save_current(self) -> None:
         """Сохранить изображение текущей вкладки через диалог выбора файла."""
         if self._busy or not self._can_save_current():
@@ -1281,13 +1491,12 @@ class MainWindow(QMainWindow):
             path = path.with_suffix(".png" if tab == "Вырезка" else ".jpg")
         if tab == "Вырезка" and path.suffix.lower() != ".png":
             self._log("WARN", "JPEG не сохраняет прозрачность — для вырезки лучше PNG.")
-        pixmap = self._save_pixmap(tab)
-        if pixmap is None:
+        if all(p.source_pixmap() is None for p in self.previews[tab]):
             self._log("WARN", f"Нечего сохранять во вкладке «{tab}».")
             return
         path.parent.mkdir(parents=True, exist_ok=True)
         fmt = "PNG" if path.suffix.lower() == ".png" else "JPG"
-        if pixmap.save(str(path), fmt, 92):
+        if self._save_tab_full(tab, path, fmt):
             self.settings.setValue("paths/last_save_dir", str(path.parent))
             self._log("OK", f"Сохранено ({tab}): {path}")
             self.statusBar().showMessage(f"Сохранено: {path}", 5000)
@@ -1395,7 +1604,10 @@ class MainWindow(QMainWindow):
         if not params["background"]:
             self._log("WARN", "Апскейл: сначала выберите фон.")
             return
-        self._start_worker("Апскейл", upscale_task, params["background"])
+        self._start_worker(
+            "Апскейл", upscale_task, params["background"],
+            options={"factor": self._upscale_factor()},
+        )
 
     def run_compose(self) -> None:
         params = self.current_params()
@@ -1468,16 +1680,23 @@ class MainWindow(QMainWindow):
     def _on_operation_success(self, name: str, result) -> None:
         path = Path(str(result))
         if name == "Вырезка":
-            self._show_preview("Вырезка", path)
+            ok = self._show_preview("Вырезка", path)
             self._activate_tab("Вырезка")
         elif name in ("Генерация фона", "Апскейл"):
-            self._set_background(path, quiet=True)
-            self._activate_tab("Фон")
+            ok = self._set_background(path, quiet=True)  # сам открывает вкладку «Фон»
+            # Показываем после смены вкладки: _on_tab_changed гасит старый тост.
+            if ok:
+                self._warn_preview_downscale(path)
         elif name == "Сборка композита":
-            self._show_preview("Результат", path)
-            self._show_preview("До — После", path, 1)
+            ok_result = self._show_preview("Результат", path)
+            ok_before = self._show_preview("До — После", path, 1)
+            ok = ok_result and ok_before
             self._activate_tab("Результат")
-        self._log("OK", f"{name}: {path}")
+        else:
+            ok = True
+        # Файл записан, но превью мог не открыться — не выдавать это за успех.
+        if ok:
+            self._log("OK", f"{name}: {path}")
 
     def _on_operation_failed(self, name: str, message: str) -> None:
         self._log("ERROR", f"{name}: {message}")
@@ -1493,11 +1712,13 @@ class MainWindow(QMainWindow):
         if worker is not None:
             worker.deleteLater()
 
-    def _show_preview(self, tab: str, path: Path, index: int = 0) -> None:
+    def _show_preview(self, tab: str, path: Path, index: int = 0) -> bool:
         preview = self.previews[tab][index]
-        if not preview.set_image(path):
+        ok = preview.set_image(path)
+        if not ok:
             self._log("ERROR", f"Не удалось показать {path} во вкладке «{tab}».")
         self._update_tab_actions()
+        return ok
 
     def _activate_tab(self, name: str) -> None:
         """Сделать вкладку текущей, если она уже не открыта."""
@@ -1523,6 +1744,20 @@ class MainWindow(QMainWindow):
         for note in notes:
             self._log("WARN", note)
         self.advisory_toast.show_notes(notes)
+        self.preview_area_controls.reposition_overlays()
+
+    def _warn_preview_downscale(self, path: Path) -> None:
+        """Честно сообщить, что превью уменьшено, а файл — полного размера."""
+        sizes = _preview_downscale(path)
+        if sizes is None:
+            return
+        (old_w, old_h), (new_w, new_h) = sizes
+        note = (
+            f"Превью уменьшено: {old_w}×{old_h} → {new_w}×{new_h} для отображения. "
+            "Файл на диске и «Сохранить» — полного размера."
+        )
+        self._log("WARN", note)
+        self.advisory_toast.show_notes([note])
         self.preview_area_controls.reposition_overlays()
 
     def _log(self, level: str, message: str) -> None:
@@ -1572,6 +1807,12 @@ class MainWindow(QMainWindow):
         self.zoom_slider.setValue(0)
         self._sync_zoom_controls()
 
+    def _upscale_factor(self) -> int:
+        """Кратность ручного апскейла: 2 — EDSR, 4 — Real-ESRGAN."""
+        return normalize_factor(
+            self.settings.value("upscale/factor", APP_DEFAULTS["upscale/factor"])
+        )
+
     def _setting_number(self, key: str, default, cast):
         try:
             return cast(self.settings.value(key, default))
@@ -1594,6 +1835,7 @@ class MainWindow(QMainWindow):
             "cut_head_ratio": self._setting_number("cut/head_ratio", APP_DEFAULTS["cut/head_ratio"], float),
             "cut_matting": bool(self.settings.value("cut/matting", APP_DEFAULTS["cut/matting"], type=bool)),
             "compose_seed": self._setting_number("compose/seed", APP_DEFAULTS["compose/seed"], int),
+            "upscale_factor": self._upscale_factor(),
         }
         for key, (slider, factor, _, _) in self.sliders.items():
             params[key] = slider.value() / factor

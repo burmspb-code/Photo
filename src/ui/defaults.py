@@ -10,7 +10,7 @@ from __future__ import annotations
 from PyQt6.QtCore import QSettings
 
 # Поднимать при изменении набора предустановок — заставит применить их заново.
-DEFAULTS_VERSION = 1
+DEFAULTS_VERSION = 2
 
 # Промпт — одноразовый ввод, а не настройка: в поле видна подсказка, которая
 # исчезает при первом же нажатии. Текст обязательных частей (realistic photo,
@@ -39,7 +39,8 @@ APP_DEFAULTS: dict[str, object] = {
     "bg/provider_api": "cloudflare",
     "bg/seed": 7,
     "bg/size": "2K",
-    "models/upscale": "realesr-general-x4v3",
+    # Апскейл: ×2 — EDSR (быстрый, сохраняет мелкие детали), ×4 — Real-ESRGAN.
+    "upscale/factor": 2,
 }
 
 
@@ -48,8 +49,10 @@ def apply_default_presets(settings: QSettings) -> bool:
 
     Старый ``bg/prompt`` удаляется при каждом запуске: раньше он хранил текст
     прошлой генерации и сразу появлялся в поле ввода вместо подсказки.
+    ``models/upscale`` удаляется при миграции — модель теперь выбрана кратностью.
     """
     settings.remove("bg/prompt")
+    settings.remove("models/upscale")
     try:
         version = int(settings.value("app/defaults_version", 0))
     except (TypeError, ValueError):

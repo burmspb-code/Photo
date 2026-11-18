@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 from src.core.progress import check_cancel, maybe_report, scaled
-from src.core.settings import PROJECT_ROOT
+from src.core.settings import PROJECT_ROOT, normalize_factor
 
 DATA_DIR = PROJECT_ROOT / "data"
 BG_DIR = DATA_DIR / "bg"
@@ -89,17 +89,19 @@ def genbg_task(prompt, out=None, *, options=None, progress=None, cancelled=None)
 
 
 def upscale_task(src, out=None, *, options=None, progress=None, cancelled=None) -> str:
-    """Апскейл изображения ×4; по умолчанию рядом с исходником."""
+    """Апскейл изображения ×2 (EDSR) или ×4; по умолчанию рядом с исходником."""
     from .upscale import upscale
 
+    params = options or {}
+    factor = normalize_factor(params.get("factor", 2))
     source = Path(src)
     if out:
         dest = _path(out, out)
     else:
-        stem = re.sub(r"-4x$", "", source.stem)
-        dest = _path(None, source.with_name(f"{stem}-4x{source.suffix or '.jpg'}"))
-    maybe_report(progress, 0, "Апскейл: старт")
-    upscale(source, dest, progress=scaled(progress, 5, 100), cancelled=cancelled)
+        stem = re.sub(r"-[24]x$", "", source.stem)
+        dest = _path(None, source.with_name(f"{stem}-{factor}x{source.suffix or '.jpg'}"))
+    maybe_report(progress, 0, f"Апскейл ×{factor}: старт")
+    upscale(source, dest, factor=factor, progress=scaled(progress, 5, 100), cancelled=cancelled)
     check_cancel(cancelled)
     return dest
 

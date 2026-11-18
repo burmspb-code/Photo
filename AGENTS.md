@@ -14,7 +14,7 @@
 Photo\
 ├── data\        изображения: bg\ (черновики), results\ (утверждённое)
 ├── docs\        документация
-├── models\      ONNX-модели: faceparser, realesr-general-x4v3
+├── models\      ONNX-модели: faceparser, edsr-x2, realesr-general-x4v3
 ├── src\         код: photo_pipeline.py, contact_sheet.py
 ├── .venv\       Poetry-окружение (Python 3.14) с зависимостями пайплайна
 ├── pyproject.toml, poetry.lock
@@ -37,7 +37,7 @@ Set-Location $root
 & $py $pp cut "C:\Users\bur_s\OneDrive\Изображения\DSC00103.JPG" "$data\DSC00103-cut.png"
 & $py $pp composite "$data\DSC00103-cut.png" "$data\bg\bg.jpg" "$data\final.jpg" --blur 0.5
 & $py $pp genbg "prompt" "$data\bg\out.jpg" --provider cloudflare --no-upscale
-& $py $pp upscale "$data\bg\out.jpg" "$data\bg\out-4x.jpg"
+& $py $pp upscale "$data\bg\out.jpg" "$data\bg\out-2x.jpg" --factor 2   # ×4: --factor 4
 ```
 
 - `cut` идёт 1–2 минуты (тайловый BiRefNet + pymatting) — это норма, не зависание.
@@ -70,4 +70,6 @@ Set-Location $root
 - Переопределение путей к ключам: `PHOTO_GOOGLE_KEY`, `PHOTO_GOOGLE_KEY_FILE`, `PHOTO_CLOUDFLARE_CREDS`, `PHOTO_HF_TOKEN`, `PHOTO_STABILITY_KEY`.
 - Google-ключ: `google_api_key.txt` или env `GOOGLE_API_KEY`/`GEMINI_API_KEY`. Модель — `PHOTO_GOOGLE_MODEL`, размер (`512`/`1K`/`2K`/`4K`) — `PHOTO_GOOGLE_SIZE` (по умолчанию `1K`).
 - Cloudflare: env `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_API_TOKEN` приоритетнее `cloudflare.json`.
-- `models\realesr-general-x4v3.onnx` — апскейл ×4; `models\faceparser.onnx` — маска волос (только для `hair`).
+- `models\edsr-x2.onnx` — ручной апскейл ×2 (по умолчанию в GUI и CLI); `models\realesr-general-x4v3.onnx` — апскейл ×4; `models\faceparser.onnx` — маска волос (только для `hair`).
+- Кратность ручного апскейла: `QSettings` → `upscale/factor` (вкладка «Апскейл», 2 или 4), CLI `--factor 2|4`; ядро `upscale(..., factor=...)`. Внутренняя доводка размеров фона в `backgrounds.py` всегда вызывает `upscale()` без factor, то есть остаётся на ×4 — не привязывать её к пользовательской настройке.
+- Модель EDSR ×2 взята из `rupeshs/edsr-onnx` — в репозитории не указана лицензия (локальное использование допустимо, для публикации уточнить).
