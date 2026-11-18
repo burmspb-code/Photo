@@ -92,4 +92,4 @@ class TestConstants(GuiTestCase):
         self.assertIn("birefnet-general", CUT_MODELS)
 
     def test_log_levels(self) -> None:
-        self.assertEqual(set(LEVEL_COLORS), {"OK", "INFO", "WARN", "ERROR"})
+        self.assertEqual(set(LEVEL_COLORS), {"OK", "HINT", "INFO", "WARN", "ERROR"})

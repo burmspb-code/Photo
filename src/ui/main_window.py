@@ -150,6 +150,7 @@ class _WinMessage(ctypes.Structure):
 
 LEVEL_COLORS = {
     "OK": "#4ade80",
+    "HINT": "#c4b5fd",
     "INFO": "#93c5fd",
     "WARN": "#fbbf24",
     "ERROR": "#f87171",
@@ -193,17 +194,23 @@ def _preview_downscale(path: str | Path) -> tuple[tuple[int, int], tuple[int, in
     return original, preview
 
 
+def _image_size(path: str | Path) -> tuple[int, int] | None:
+    """Настоящий размер файла из заголовка, без декодирования картинки."""
+    size = QImageReader(str(path)).size()
+    return (size.width(), size.height()) if size.isValid() else None
+
+
 def _image_info(path: str | Path) -> tuple[str, str]:
     """Подпись «имя · WxH» и tooltip с путём и весом файла.
 
-    Разрешение читается из заголовка файла через ``QImageReader.size()``, а не
-    из уменьшенного превью: окно показывает копию до ``MAX_PREVIEW_SIDE``, но
-    подпись должна сообщать настоящий размер файла на диске.
+    Разрешение читается из заголовка файла, а не из уменьшенного превью: окно
+    показывает копию до ``MAX_PREVIEW_SIDE``, но подпись должна сообщать
+    настоящий размер файла на диске.
     """
     file = Path(path)
-    size = QImageReader(str(file)).size()
+    dimensions = _image_size(file)
     resolution = (
-        f"{size.width()}×{size.height()}" if size.isValid() else "размер неизвестен"
+        f"{dimensions[0]}×{dimensions[1]}" if dimensions else "размер неизвестен"
     )
     label = f"{file.name} · {resolution}"
     try:
@@ -751,6 +758,9 @@ class MainWindow(QMainWindow):
         self.previews: dict[str, tuple[ImagePreview, ...]] = {}
         self._worker: CoreWorker | None = None
         self._busy = False
+        self._last_hint: str | None = None
+        self._cut_source_path: Path | None = None
+        self._composed_bg_path: Path | None = None
 
         self._init_ui()
         self._connect_actions()
@@ -759,6 +769,7 @@ class MainWindow(QMainWindow):
         self._ui_ready = True
 
         self._log("OK", "Готово. Откройте исходное фото через Файл → Открыть исходное фото.")
+        self._update_hint()
 
     # ---------- построение окна ----------
 
@@ -1305,6 +1316,70 @@ class MainWindow(QMainWindow):
         self.btn_clear_current.setEnabled(active and self._can_clear_current())
         self.btn_save_current.setEnabled(active and self._can_save_current())
 
+    def _preview_path(self, tab: str, index: int = 0) -> Path | None:
+        raw = self.previews[tab][index].source_path()
+        return Path(raw) if raw else None
+
+    def _next_hint(self) -> str:
+        """Один полезный совет под текущее состояние обработки."""
+        source = self.source_path
+        cut = self._preview_path("Вырезка")
+        background = self.background_path
+        result = self._preview_path("Результат")
+
+        if not source:
+            return "Откройте исходное фото (Ctrl+O) — с него начинается работа."
+        if not cut:
+            return "Вырежьте объект: только после этого можно заменить фон."
+        if self._cut_source_path and self._cut_source_path != source:
+            return "Исходник заменён после вырезки — повторите вырезку."
+        if not background:
+            return (
+                "Выберите готовый фон или опишите его в поле запроса и нажмите "
+                "«Сгенерировать фон»."
+            )
+        if result:
+            if self._composed_bg_path and self._composed_bg_path != background:
+                return "Фон изменился после сборки — соберите композит заново."
+            return "Результат готов — сохраните его кнопкой «Сохранить результат» (Ctrl+S)."
+
+        source_size = _image_size(source)
+        bg_size = _image_size(background)
+        if source_size and bg_size:
+            sw, sh = source_size
+            bw, bh = bg_size
+            source_side, bg_side = max(sw, sh), max(bw, bh)
+            if bg_side < source_side * 0.9:
+                if background.stem.endswith(("-2x", "-4x")):
+                    return (
+                        f"Фон после апскейла {bw}×{bh} всё ещё меньше исходника "
+                        f"{sw}×{sh} — можно повторить апскейл или оставить как есть."
+                    )
+                return (
+                    f"Фон {bw}×{bh} меньше исходника {sw}×{sh} — сделайте апскейл "
+                    f"×{self._upscale_factor()}. Размер результата останется {sw}×{sh}."
+                )
+            if bg_side > MAX_PREVIEW_SIDE:
+                return (
+                    f"Фон {bw}×{bh} больше 4096 px: в окне уменьшенное превью, файл "
+                    "и «Сохранить» — полного размера. Собирайте композит."
+                )
+            return (
+                f"Фон {bw}×{bh} не мельче исходника {sw}×{sh} — апскейл не нужен, "
+                "собирайте композит."
+            )
+        return "Соберите композит — фон и вырезка готовы."
+
+    def _update_hint(self) -> None:
+        """Писать совет в инфоокно только при изменении состояния."""
+        if self._busy:
+            return
+        hint = self._next_hint()
+        if hint == self._last_hint:
+            return
+        self._last_hint = hint
+        self._log("HINT", hint)
+
     def _update_preview_info(self, *_args) -> None:
         """Имя и настоящее разрешение файлов активной вкладки в шапке зоны."""
         name = self.tabs.tabText(self.tabs.currentIndex())
@@ -1343,6 +1418,7 @@ class MainWindow(QMainWindow):
             self.preview_area_controls.zoom_overlay._hide()
         self._log("OK", f"Предпросмотр «{name}» очищен. Файлы на диске не удалены.")
         self._update_tab_actions()
+        self._update_hint()
 
     def _dialog_start_dir(self, key: str, fallback: Path) -> str:
         """Папка последнего файла; если её уже нет — стандартная папка проекта."""
@@ -1365,9 +1441,12 @@ class MainWindow(QMainWindow):
             self._update_source_advisory(path)
             self._update_tab_actions()
             self._activate_tab("Исходник")
+            self._update_hint()
         else:
+            self.source_path = None
             self._log("ERROR", f"Не удалось прочитать: {path}")
             self.advisory_toast.dismiss()
+            self._update_hint()
 
     def open_background(self) -> None:
         start = self._dialog_start_dir("paths/last_bg_dir", BG_DIR)
@@ -1387,6 +1466,7 @@ class MainWindow(QMainWindow):
             self._log("OK", f"Фон: {path}")
         self._update_tab_actions()
         self._activate_tab("Фон")
+        self._update_hint()
         return True
 
     def open_settings(self) -> None:
@@ -1395,6 +1475,7 @@ class MainWindow(QMainWindow):
             self._load_settings()
             self.tb_upscale.setToolTip(f"Апскейл ×{self._upscale_factor()} выбранного фона")
             self._log("OK", "Настройки сохранены.")
+            self._update_hint()
             if dialog.generate_requested:
                 # Промпт из диалога одноразовый: переносим его в панель только
                 # при запуске генерации, чтобы не затирать введённый пользователем.
@@ -1666,6 +1747,7 @@ class MainWindow(QMainWindow):
             self.progress.setValue(0)
         elif self.progress.maximum() == 0:
             self.progress.setRange(0, 100)
+        self._update_hint()
 
     def _on_progress(self, percent: int, message: str) -> None:
         if percent < 0:
@@ -1681,6 +1763,7 @@ class MainWindow(QMainWindow):
         path = Path(str(result))
         if name == "Вырезка":
             ok = self._show_preview("Вырезка", path)
+            self._cut_source_path = self.source_path
             self._activate_tab("Вырезка")
         elif name in ("Генерация фона", "Апскейл"):
             ok = self._set_background(path, quiet=True)  # сам открывает вкладку «Фон»
@@ -1691,12 +1774,14 @@ class MainWindow(QMainWindow):
             ok_result = self._show_preview("Результат", path)
             ok_before = self._show_preview("До — После", path, 1)
             ok = ok_result and ok_before
+            self._composed_bg_path = self.background_path
             self._activate_tab("Результат")
         else:
             ok = True
         # Файл записан, но превью мог не открыться — не выдавать это за успех.
         if ok:
             self._log("OK", f"{name}: {path}")
+        self._update_hint()
 
     def _on_operation_failed(self, name: str, message: str) -> None:
         self._log("ERROR", f"{name}: {message}")
