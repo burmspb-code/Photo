@@ -14,6 +14,12 @@ class TestPromptPlaceholder(GuiTestCase):
         stored.setValue("bg/prompt", "realistic photo, old generation")
         stored.sync()
 
+    def test_placeholder_text_is_the_northern_lights_prompt(self) -> None:
+        self.assertEqual(
+            PROMPT_PLACEHOLDER,
+            "Создай реалистичное фото северного сияния на ночном небе",
+        )
+
     def test_main_window_starts_empty_with_placeholder(self) -> None:
         apply_default_presets(app_settings())
         window = MainWindow()

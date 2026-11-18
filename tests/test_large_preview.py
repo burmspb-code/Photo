@@ -79,8 +79,9 @@ class TestLargePreview(GuiTestCase):
             self.window.background_path = IMAGE
             cut = Path(tempfile.gettempdir()) / "photo-compose-cut.png"
             _write(cut, np.zeros((8, 8, 4), dtype=np.uint8))
+            self.window.previews["Вырезка"][0].set_image(cut)
+            self.window._cut_source_path = IMAGE
             with (
-                patch("src.ui.main_window.CUTOUT_FILE", cut),
                 patch("src.ui.main_window.compose_task", return_value=str(result)),
                 patch("src.ui.main_window.QImage", _qt_refuses_path(result)),
                 patch("src.ui.main_window._read", return_value=None),

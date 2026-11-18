@@ -429,27 +429,33 @@ class TestGuiOperations(GuiTestCase):
         self.assertTrue(self.window.advisory_toast.isHidden())
         self.assertNotIn("Превью уменьшено", self.window.log_display.toPlainText())
 
-    def test_compose_requires_cutout(self) -> None:
+    def test_compose_requires_cutout_from_current_session(self) -> None:
         self.window.source_path = IMAGE
         self.window.background_path = self._image("bg.jpg")
-        with patch("src.ui.main_window.CUTOUT_FILE", self.dir / "missing.png"):
-            self.window.tb_compose.trigger()
+        # Файл вырезки от прошлого запуска есть на диске, но в этой сессии
+        # вырезки нет — собирать композит нельзя.
+        stale = self.dir / "cutout.png"
+        _write(stale, np.zeros((8, 10, 4), np.uint8))
+        self.assertTrue(stale.exists())
+        self.window.tb_compose.trigger()
         self.assertIsNone(self.window._worker)
-        self.assertIn("вырежьте объект", self.window.log_display.toPlainText())
+        logs = self.window.log_display.toPlainText()
+        self.assertIn("[HINT]", logs)
+        self.assertIn("вырежьте объект", logs)
 
     def test_compose_success_updates_result_tabs(self) -> None:
         cut = self._image("cut.png", 4)
         result = self._image("result.jpg")
         self.window.source_path = IMAGE
         self.window.background_path = self._image("bg.jpg")
+        self.window.previews["Вырезка"][0].set_image(cut)
+        self.window._cut_source_path = IMAGE
         self.window.previews["До — После"][0].set_image(IMAGE)
         self.window.tabs.setCurrentIndex(2)  # сборку запускаем не из вкладки результата
-        with (
-            patch("src.ui.main_window.CUTOUT_FILE", cut),
-            patch("src.ui.main_window.compose_task", return_value=str(result)),
-        ):
+        with patch("src.ui.main_window.compose_task", return_value=str(result)) as compose:
             self.window.tb_compose.trigger()
             self._finish()
+        self.assertEqual(compose.call_args.args[0], str(cut))
         self.assertIsNotNone(self.window.previews["Результат"][0].source_pixmap())
         self.assertIsNotNone(self.window.previews["До — После"][1].source_pixmap())
         self.assertEqual(self.window.tabs.tabText(self.window.tabs.currentIndex()), "Результат")

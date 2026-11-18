@@ -81,7 +81,7 @@ from PyQt6.QtWidgets import (
 from src.core.cutout import cut_advisory
 from src.core.image import _read, _write
 from src.core.settings import normalize_factor
-from src.core.tasks import CUTOUT_FILE, compose_task, cut_task, genbg_task, upscale_task
+from src.core.tasks import compose_task, cut_task, genbg_task, upscale_task
 
 from .about_dialog import AboutDialog
 from .defaults import APP_DEFAULTS, PROMPT_PLACEHOLDER
@@ -1388,6 +1388,20 @@ class MainWindow(QMainWindow):
         self._last_hint = hint
         self._log("HINT", hint)
 
+    def _action_hint(self, hint: str) -> None:
+        """Объяснить отказ операции по действию пользователя, без фильтра повторов.
+
+        Обычные подсказки гасятся по `_last_hint`, а здесь совет нужен именно
+        в момент нажатия кнопки — даже если он уже звучал раньше. При выклю-
+        ченных подсказках причина отказа всё равно остаётся в инфоокне как WARN.
+        """
+        if self._hints_enabled():
+            self._last_hint = hint
+            self._log("HINT", hint)
+        else:
+            self._last_hint = None
+            self._log("WARN", hint)
+
     def _update_preview_info(self, *_args) -> None:
         """Имя и настоящее разрешение файлов активной вкладки в шапке зоны."""
         name = self.tabs.tabText(self.tabs.currentIndex())
@@ -1703,11 +1717,21 @@ class MainWindow(QMainWindow):
         if not params["source"] or not params["background"]:
             self._log("WARN", "Сборка композита: нужны исходное фото и фон.")
             return
-        if not Path(CUTOUT_FILE).exists():
-            self._log("WARN", "Сборка композита: сначала вырежьте объект.")
+        cut = self._preview_path("Вырезка")
+        if not cut:
+            self._action_hint(
+                "Для сборки не хватает вырезки текущего фото — вырежьте объект "
+                "кнопкой «Вырезать», затем нажмите «Собрать»."
+            )
+            return
+        if self._cut_source_path != self.source_path:
+            self._action_hint("Исходник заменён после вырезки — повторите вырезку перед сборкой.")
+            return
+        if not cut.is_file():
+            self._action_hint("Файл вырезки не найден — повторите вырезку перед сборкой.")
             return
         self._start_worker(
-            "Сборка композита", compose_task, str(CUTOUT_FILE), params["background"],
+            "Сборка композита", compose_task, str(cut), params["background"],
             options={
                 "blur": params["blur"],
                 "shadow": params["shadow"],

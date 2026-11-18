@@ -119,6 +119,47 @@ class TestInfoHints(GuiTestCase):
         self.window._update_hint()
         self.assertIn("апскейл ×2", self.last_hint())
 
+    def test_compose_without_cut_does_not_use_stale_file(self) -> None:
+        self.window.source_path = self._image("source.jpg")
+        self.window._set_background(self._image("park.jpg"))
+        stale = self.dir / "cutout.png"
+        _write(stale, np.zeros((8, 10, 4), np.uint8))
+        self.assertTrue(stale.exists())
+
+        self.window.tb_compose.trigger()
+
+        self.assertIsNone(self.window._worker)
+        hint = self.last_hint()
+        self.assertIn("не хватает вырезки", hint)
+        self.assertIn("вырежьте объект", hint)
+
+    def test_compose_with_cut_from_other_source_is_blocked(self) -> None:
+        old_source = self._image("old-source.jpg")
+        self.window.source_path = old_source
+        self.window.previews["Вырезка"][0].set_image(self._image("cutout.png"))
+        self.window._cut_source_path = old_source
+        self.window._set_background(self._image("park.jpg"))
+        self.window.source_path = self._image("new-source.jpg")
+
+        self.window.tb_compose.trigger()
+
+        self.assertIsNone(self.window._worker)
+        self.assertIn("повторите вырезку", self.last_hint())
+
+    def test_blocked_compose_reports_warn_when_hints_disabled(self) -> None:
+        self.window.settings.setValue("ui/hints", False)
+        self.window.source_path = self._image("source.jpg")
+        self.window._set_background(self._image("park.jpg"))
+        before = len(self.hints())
+
+        self.window.tb_compose.trigger()
+
+        logs = self.window.log_display.toPlainText()
+        self.assertIsNone(self.window._worker)
+        self.assertEqual(len(self.hints()), before)
+        self.assertIn("[WARN]", logs)
+        self.assertIn("вырежьте объект", logs)
+
     def test_no_hint_is_written_while_busy(self) -> None:
         count = len(self.hints())
         self.window._set_busy(True)

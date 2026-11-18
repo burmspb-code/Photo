@@ -1,7 +1,7 @@
 """Тесты диалога настроек и чтения настроек главным окном."""
 from __future__ import annotations
 
-from PyQt6.QtWidgets import QTabWidget
+from PyQt6.QtWidgets import QFormLayout, QSizePolicy, QTabWidget
 
 from src.ui.main_window import CUT_MODELS, MainWindow
 from src.ui.settings_dialog import SettingsDialog
@@ -21,6 +21,32 @@ class TestSettingsDialog(GuiTestCase):
             [tabs.tabText(i) for i in range(tabs.count())],
             ["Модели", "Вырезка", "Фон", "Композит", "Апскейл", "Пути", "Общие"],
         )
+
+    def test_background_tab_rows_are_compact(self) -> None:
+        dialog = SettingsDialog()
+        try:
+            dialog.show()
+            self.process_events()
+            page = dialog.findChild(QTabWidget).widget(2)
+            form = page.layout()
+            self.assertEqual(
+                dialog.controls["bg/prompt"].sizePolicy().verticalPolicy(),
+                QSizePolicy.Policy.Fixed,
+            )
+            ys = [
+                form.itemAt(row, QFormLayout.ItemRole.FieldRole).geometry().y()
+                for row in range(form.rowCount())
+            ]
+            self.assertLess(ys[-1] - ys[0], 200)
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self.process_events()
+
+    def test_dead_background_fields_are_gone(self) -> None:
+        dialog = SettingsDialog()
+        self.assertNotIn("bg/drafts", dialog.controls)
+        self.assertNotIn("bg/aspect", dialog.controls)
 
     def test_upscale_factor_combo_saves_number_and_loads_it(self) -> None:
         dialog = SettingsDialog()

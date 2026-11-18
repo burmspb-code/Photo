@@ -202,6 +202,9 @@ class SettingsDialog(QDialog):
         prompt = QPlainTextEdit()
         prompt.setPlaceholderText(PROMPT_PLACEHOLDER)
         prompt.setFixedHeight(80)
+        # Без Fixed по вертикали QFormLayout растягивает все строки под
+        # Expanding-поле, и параметры оказываются разнесены большими пустотами.
+        prompt.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self._add(form, "bg/prompt", "Промпт", prompt, "")
         generate = QPushButton("Сгенерировать фон")
         generate.setObjectName("settingsGenerate")
@@ -216,8 +219,6 @@ class SettingsDialog(QDialog):
         self.background_model.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.background_model.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         form.addRow("Модель:", self.background_model)
-        self._add(form, "bg/drafts", "Число черновиков", self._spin(1, 12), 3)
-        self._add(form, "bg/aspect", "Соотношение сторон", self._combo(["4:3", "3:2", "1:1", "16:9"]), "4:3")
         self._add(form, "bg/seed", "Seed", self._spin(0, 999999), 7)
         self._add(form, "bg/size", "Размер фона", self._combo(SIZE_ORDER), "2K")
         return page
