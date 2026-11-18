@@ -76,7 +76,8 @@ from PyQt6.QtWidgets import (
 from src.core.cutout import cut_advisory
 from src.core.tasks import CUTOUT_FILE, compose_task, cut_task, genbg_task, upscale_task
 
-from .defaults import APP_DEFAULTS
+from .about_dialog import AboutDialog
+from .defaults import APP_DEFAULTS, PROMPT_PLACEHOLDER
 from .settings_dialog import SettingsDialog
 from .styles import THEMES
 from .workers import CoreWorker
@@ -606,6 +607,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(800, 600)
         self.resize(1240, 820)
         self.setStyleSheet(THEMES["Тёмная"])
+        self._theme_name = "Тёмная"  # для нативной шапки диалогов
 
         self._menu_bar = WindowMenuBar(self)
         self.setMenuBar(self._menu_bar)
@@ -691,6 +693,8 @@ class MainWindow(QMainWindow):
         self.act_show_log = menu.addAction("Показать панель сообщений")
         self.act_show_log.setCheckable(True)
         self.act_show_log.setChecked(True)
+
+        self.act_about = self._menu_bar.addAction("&О программе")
 
     def _toggle_maximize(self) -> None:
         if self.isMaximized():
@@ -849,6 +853,7 @@ class MainWindow(QMainWindow):
         box.addWidget(self.btn_pick_background)
         box.addWidget(QLabel("Промпт для генерации:"))
         self.prompt = QPlainTextEdit()
+        self.prompt.setPlaceholderText(PROMPT_PLACEHOLDER)
         self.prompt.setFixedHeight(64)
         box.addWidget(self.prompt)
         self.btn_generate = QPushButton("Сгенерировать фон")
@@ -919,12 +924,22 @@ class MainWindow(QMainWindow):
                 self.previews[name] = (preview,)
             self.tabs.addTab(widget, name)
 
-        # Кнопка сохранения — в том же ряду, что и вкладки, справа от них.
+        # Кнопки очистки и сохранения — в том же ряду, что и вкладки, справа от них.
+        self.btn_clear_current = QPushButton(_icon("SP_DialogDiscardButton"), "Очистить")
+        self.btn_clear_current.setObjectName("clearCurrent")
+        self.btn_clear_current.setToolTip("Очистить предпросмотр текущей вкладки (файлы не удаляются)")
+        self.btn_clear_current.setEnabled(False)
         self.btn_save_current = QPushButton(_icon("SP_DirIcon"), "Сохранить")
         self.btn_save_current.setObjectName("saveCurrent")
         self.btn_save_current.setToolTip("Сохранить изображение текущей вкладки")
         self.btn_save_current.setEnabled(False)
-        self.tabs.setCornerWidget(self.btn_save_current, Qt.Corner.TopRightCorner)
+        tab_buttons = QWidget()
+        button_row = QHBoxLayout(tab_buttons)
+        button_row.setContentsMargins(0, 0, 0, 0)
+        button_row.setSpacing(2)
+        button_row.addWidget(self.btn_clear_current)
+        button_row.addWidget(self.btn_save_current)
+        self.tabs.setCornerWidget(tab_buttons, Qt.Corner.TopRightCorner)
 
         # Вертикальная шкала кратности в правом верхнем углу изображения.
         zoom_overlay = ZoomOverlay()
@@ -1040,6 +1055,7 @@ class MainWindow(QMainWindow):
         self.act_save_result.triggered.connect(self.save_result)
         self.act_exit.triggered.connect(self.close)
         self.act_settings.triggered.connect(self.open_settings)
+        self.act_about.triggered.connect(self.open_about)
 
         self.act_theme_dark.triggered.connect(lambda: self._apply_theme("Тёмная"))
         self.act_theme_light.triggered.connect(lambda: self._apply_theme("Светлая"))
@@ -1065,11 +1081,12 @@ class MainWindow(QMainWindow):
         for previews in self.previews.values():
             for preview in previews:
                 preview.moved.connect(self.preview_area_controls.reposition_overlays)
-                preview.moved.connect(self._update_save_action)
+                preview.moved.connect(self._update_tab_actions)
 
+        self.btn_clear_current.clicked.connect(self.clear_current)
         self.btn_save_current.clicked.connect(self.save_current)
-        self.tabs.currentChanged.connect(self._update_save_action)
-        self._update_save_action()
+        self.tabs.currentChanged.connect(self._update_tab_actions)
+        self._update_tab_actions()
 
         self.tb_open_source.triggered.connect(self.open_source)
         self.tb_open_background.triggered.connect(self.open_background)
@@ -1103,14 +1120,47 @@ class MainWindow(QMainWindow):
             return False
         return all(preview.source_pixmap() is not None for preview in self.previews[name])
 
-    def _update_save_action(self, _index: int | None = None) -> None:
-        self.btn_save_current.setEnabled(not self._busy and self._can_save_current())
+    def _can_clear_current(self) -> bool:
+        """«Очистить» активна, когда в текущей вкладке есть что сбрасывать."""
+        name = self.tabs.tabText(self.tabs.currentIndex())
+        if name not in SAVE_TABS:  # исходник очищается только выбором нового файла
+            return False
+        if name == "Фон" and self.background_path is not None:
+            return True
+        return any(preview.source_pixmap() is not None for preview in self.previews[name])
+
+    def _update_tab_actions(self, _index: int | None = None) -> None:
+        """Сохранить/Очистить зависят от текущей вкладки и занятости приложения."""
+        name = self.tabs.tabText(self.tabs.currentIndex())
+        active = not self._busy
+        self.btn_clear_current.setVisible(name in SAVE_TABS)
+        self.btn_clear_current.setEnabled(active and self._can_clear_current())
+        self.btn_save_current.setEnabled(active and self._can_save_current())
 
     def _on_tab_changed(self, index: int) -> None:
         if self.tabs.tabText(index) != "Исходник":
             self.advisory_toast.dismiss()
         if not self._has_current_image():
             self.preview_area_controls.zoom_overlay._hide()
+
+    def clear_current(self) -> None:
+        """Сбросить предпросмотр этапа, чтобы переделать его заново.
+
+        Файлы на диске не удаляются: сбрасывается только предпросмотр, поэтому
+        в логе явно говорится, что очищено изображение вкладки.
+        """
+        if self._busy or not self._can_clear_current():
+            return
+        name = self.tabs.tabText(self.tabs.currentIndex())
+        for preview in self.previews[name]:
+            preview.clear_image()
+        if name == "Фон":
+            self.background_path = None
+            self.lbl_background.setText("Файл не выбран")
+        if not self._has_current_image():
+            self.preview_area_controls.zoom_overlay._hide()
+        self._log("OK", f"Предпросмотр «{name}» очищен. Файлы на диске не удалены.")
+        self._update_tab_actions()
 
     def _dialog_start_dir(self, key: str, fallback: Path) -> str:
         """Папка последнего файла; если её уже нет — стандартная папка проекта."""
@@ -1131,7 +1181,7 @@ class MainWindow(QMainWindow):
             self.lbl_source.setText(path)
             self._log("OK", f"Исходное фото: {path}")
             self._update_source_advisory(path)
-            self._update_save_action()
+            self._update_tab_actions()
             self._activate_tab("Исходник")
         else:
             self._log("ERROR", f"Не удалось прочитать: {path}")
@@ -1152,15 +1202,23 @@ class MainWindow(QMainWindow):
         self.lbl_background.setText(str(path))
         if not quiet:
             self._log("OK", f"Фон: {path}")
-        self._update_save_action()
+        self._update_tab_actions()
 
     def open_settings(self) -> None:
         dialog = SettingsDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._load_settings()  # промпт из диалога должен попасть в current_params()
+            self._load_settings()
             self._log("OK", "Настройки сохранены.")
             if dialog.generate_requested:
+                # Промпт из диалога одноразовый: переносим его в панель только
+                # при запуске генерации, чтобы не затирать введённый пользователем.
+                typed = dialog.prompt_text
+                if typed:
+                    self.prompt.setPlainText(typed)
                 self.run_generate()
+
+    def open_about(self) -> None:
+        AboutDialog(self, dark=self._theme_name == "Тёмная").exec()
 
     def save_result(self) -> None:
         preview = self.previews["Результат"][0]
@@ -1276,6 +1334,7 @@ class MainWindow(QMainWindow):
     def _apply_theme(self, name: str) -> None:
         if name not in THEMES:
             name = "Тёмная"
+        self._theme_name = name
         self.setStyleSheet(THEMES[name])
         self.act_theme_dark.setChecked(name == "Тёмная")
         self.act_theme_light.setChecked(name == "Светлая")
@@ -1387,7 +1446,7 @@ class MainWindow(QMainWindow):
         ):
             widget.setEnabled(not busy)
         self._busy = busy
-        self._update_save_action()
+        self._update_tab_actions()
         self.btn_stop.setEnabled(busy)
         self.tb_stop.setEnabled(busy)
         if busy:
@@ -1417,6 +1476,7 @@ class MainWindow(QMainWindow):
         elif name == "Сборка композита":
             self._show_preview("Результат", path)
             self._show_preview("До — После", path, 1)
+            self._activate_tab("Результат")
         self._log("OK", f"{name}: {path}")
 
     def _on_operation_failed(self, name: str, message: str) -> None:
@@ -1437,7 +1497,7 @@ class MainWindow(QMainWindow):
         preview = self.previews[tab][index]
         if not preview.set_image(path):
             self._log("ERROR", f"Не удалось показать {path} во вкладке «{tab}».")
-        self._update_save_action()
+        self._update_tab_actions()
 
     def _activate_tab(self, name: str) -> None:
         """Сделать вкладку текущей, если она уже не открыта."""
@@ -1480,7 +1540,7 @@ class MainWindow(QMainWindow):
         if index >= 0:
             self.cut_model.setCurrentIndex(index)
         self.portrait.setChecked(s.value("cut/portrait", APP_DEFAULTS["cut/portrait"], type=bool))
-        self.prompt.setPlainText(str(s.value("bg/prompt", APP_DEFAULTS["bg/prompt"])))
+        # Промпт намеренно не восстанавливается: поле начинается пустым с подсказкой.
         # Ползунки хранят масштабированные целые, а диалог настроек —
         # вещественные значения. Приводим к одному формату на чтении.
         defaults = {

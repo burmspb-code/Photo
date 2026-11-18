@@ -21,6 +21,7 @@
 | [04-result-2026-11-17-park-c.md](04-result-2026-11-17-park-c.md) | Карточка утверждённого результата: параметры, команды, хеши |
 | [05-troubleshooting.md](05-troubleshooting.md) | Типичные ошибки и что с ними делать |
 | [06-development.md](06-development.md) | PyCharm, Poetry, `.venv` и резервное окружение `rembg-env` |
+| [07-market-analysis.md](07-market-analysis.md) | Аналоги на рынке, цены и лимиты, конкурентные преимущества и ограничения |
 
 ## Структура проекта
 

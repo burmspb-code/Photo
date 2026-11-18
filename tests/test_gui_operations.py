@@ -24,6 +24,7 @@ class TestGuiOperations(GuiTestCase):
         self._tmp = tempfile.TemporaryDirectory(prefix="photo-operations-")
         self.dir = Path(self._tmp.name)
         self.window = MainWindow()
+        self.window.prompt.setPlainText("realistic photo, quiet park, overcast light")
         self.window.show()
         self.process_events()
 
@@ -354,6 +355,7 @@ class TestGuiOperations(GuiTestCase):
         background = self._image("from-settings.jpg")
 
         def exec_and_click(dialog):
+            dialog.controls["bg/prompt"].setPlainText("realistic photo, park after rain")
             dialog.findChild(QPushButton, "settingsGenerate").click()
             return QDialog.DialogCode.Accepted
 
@@ -405,4 +407,5 @@ class TestGuiOperations(GuiTestCase):
             self._finish()
         self.assertIsNotNone(self.window.previews["Результат"][0].source_pixmap())
         self.assertIsNotNone(self.window.previews["До — После"][1].source_pixmap())
+        self.assertEqual(self.window.tabs.tabText(self.window.tabs.currentIndex()), "Результат")
         self.assertIn("result.jpg", self.window.log_display.toPlainText())

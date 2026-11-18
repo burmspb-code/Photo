@@ -27,7 +27,8 @@ from PyQt6.QtWidgets import (
 
 from src.core.sizes import SIZE_ORDER
 
-from .defaults import APP_DEFAULTS
+from .defaults import APP_DEFAULTS, PROMPT_PLACEHOLDER
+from .native_titlebar import apply_dark_titlebar, theme_is_dark
 
 CUT_MODELS = (
     "birefnet-general",
@@ -54,6 +55,7 @@ PROVIDER_INFO = {
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._dark_titlebar = theme_is_dark(parent)
         self.settings = QSettings("Photo", "Photo")
         self.controls: dict[str, QWidget] = {}
         self.defaults: dict[str, object] = {}
@@ -82,6 +84,15 @@ class SettingsDialog(QDialog):
         # Подключаем после создания всех вкладок: слот обновляет обе метки.
         self.controls["bg/provider_api"].currentTextChanged.connect(self._update_provider_info)
         self._load()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        apply_dark_titlebar(self, self._dark_titlebar)
+
+    @property
+    def prompt_text(self) -> str:
+        """Введённый промпт (подсказка в текст не входит)."""
+        return str(self.controls["bg/prompt"].toPlainText()).strip()
 
     def _add(self, form: QFormLayout, key: str, label: str, widget: QWidget, default) -> QWidget:
         form.addRow(label, widget)
@@ -191,11 +202,9 @@ class SettingsDialog(QDialog):
         page = QWidget()
         form = QFormLayout(page)
         prompt = QPlainTextEdit()
+        prompt.setPlaceholderText(PROMPT_PLACEHOLDER)
         prompt.setFixedHeight(80)
-        self._add(
-            form, "bg/prompt", "Промпт", prompt,
-            "realistic photo, no people, no text, soft overcast light",
-        )
+        self._add(form, "bg/prompt", "Промпт", prompt, "")
         generate = QPushButton("Сгенерировать фон")
         generate.setObjectName("settingsGenerate")
         generate.setToolTip("Применить настройки и сразу сгенерировать фон")
@@ -266,7 +275,9 @@ class SettingsDialog(QDialog):
             elif isinstance(widget, QSpinBox):
                 widget.setValue(int(self.settings.value(key, default)))
             elif isinstance(widget, QPlainTextEdit):
-                widget.setPlainText(str(self.settings.value(key, default)))
+                # Промпт не сохраняется между запусками — в поле всегда подсказка.
+                if key != "bg/prompt":
+                    widget.setPlainText(str(self.settings.value(key, default)))
             elif isinstance(widget, QLabel):
                 widget.setText(str(self.settings.value(key, default)))
             else:
@@ -275,6 +286,8 @@ class SettingsDialog(QDialog):
 
     def _save(self) -> None:
         for key, widget in self.controls.items():
+            if key == "bg/prompt":
+                continue  # одноразовый ввод, не настройка
             if isinstance(widget, QCheckBox):
                 value = widget.isChecked()
             elif isinstance(widget, (QComboBox, QLabel)):
@@ -286,6 +299,7 @@ class SettingsDialog(QDialog):
             else:
                 value = widget.text()
             self.settings.setValue(key, value)
+        self.settings.remove("bg/prompt")  # удалить текст прошлой генерации
         self.settings.sync()
         self.accept()
 
