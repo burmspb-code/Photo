@@ -8,7 +8,7 @@ Commands:
   genbg     <prompt> <out.jpg> [--width 886] [--height 664] [--seed 7] [--no-upscale]
             [--size 1K|2K|4K]
             [--provider auto|google|cloudflare|stability|huggingface|pollinations] [--model ...]
-  upscale   <source> <out.jpg|png>
+  upscale   <source> <out.jpg|png> [--factor 2|4]
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from src.core.prompt import prepare_prompt  # noqa: E402 — перевод и �
 from src.core.compose import _cover, composite  # noqa: E402, F401 — обратная совместимость
 from src.core.cutout import make_cutout, recolor_hair  # noqa: E402
 from src.core.image import _blur, _levels, _read, _write, analyze  # noqa: E402, F401 — обратная совместимость
-from src.core.settings import ESR_MODEL  # noqa: E402, F401 — обратная совместимость
+from src.core.settings import ESR_MODEL, normalize_factor  # noqa: E402, F401 — обратная совместимость
 from src.core.upscale import upscale  # noqa: E402
 
 
@@ -73,7 +73,7 @@ def main(argv):
               provider=opts.get("provider", "auto"), model=opts.get("model"),
               size=opts.get("size"))
     elif cmd == "upscale":
-        upscale(pos[0], pos[1])
+        upscale(pos[0], pos[1], factor=normalize_factor(opts.get("factor", 2)))
     else:
         print(f"неизвестная команда: {cmd}")
         return 1

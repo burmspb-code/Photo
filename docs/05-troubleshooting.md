@@ -12,6 +12,30 @@ curl.exe -4 -sS "https://api.cloudflare.com/client/v4/"
 
 Python без патча и Node `fetch` будут таймаутиться. Лечится только IPv4 или VPN.
 
+### Cloudflare: `WinError 10054` / `Recv failure: Connection was reset`
+
+TCP до `api.cloudflare.com` устанавливается за ~0.04 с, но TLS-handshake срывается через ~19–21 с. Это **фильтрация по SNI** на пути трафика, а не проблема ключа или кода: одинаково рвутся `api.`, `dash.`, `www.cloudflare.com`, `pages.dev`, `cf.com`, `discord.com`, но проходят `https://1.1.1.1`, `workers.dev` и обычные сайты. Проверка (без утечки токена):
+
+```powershell
+curl.exe -4 -v --max-time 25 -o NUL https://api.cloudflare.com/client/v4/
+# Trying 104.19.192.29:443 -> ALPN offer -> Recv failure: Connection was reset
+curl.exe -4 -k -o NUL -w "http=%{http_code} total=%{time_total}" `
+  -H "Host: api.cloudflare.com" https://104.19.192.29/client/v4/
+# http=404 total=0.2  — без SNI соединение проходит
+```
+
+Обход через IP + `Host` для генерации **непригоден**: ответ API приходит (~0.24 с до первого байта), но передача обрывается на ~25 КБ от ~760 КБ (картинка не скачивается). Вариант с чужим разрешённым SNI (`workers.dev`) даёт `403` — Cloudflare роутит по SNI, а не по `Host`.
+
+Лечение — вернуть VPN/exit node, чтобы трафик шёл мимо фильтрующего провайдера. Проверить:
+
+```powershell
+& "C:\Program Files\Tailscale\tailscale.exe" exit-node list   # не должно быть "no exit nodes found"
+& "C:\Program Files\Tailscale\tailscale.exe" status
+netsh winhttp show proxy                                       # при включённом прокси — не "Прямой доступ"
+```
+
+В `%USERPROFILE%\AppData\Local\Temp` и реестре `HKCU:\...\Internet Settings` остаётся `ProxyServer = 127.0.0.1:2080` от старого локального прокси; если слушателя на 2080 нет, он не помогает.
+
 ### Cloudflare: `Invalid API Token` на `/user/tokens/verify`
 
 Это нормально: токены, созданные под Workers AI, не проходят проверку на общем эндпоинте. Токен при этом рабочий. Проверять запросом к `/accounts/<id>/ai/models/search` или просто сгенерировать картинку.
@@ -69,6 +93,10 @@ Imagen отключён, актуальны только Gemini image-модел
 ### `cut` идёт долго
 
 1–2 минуты — норма: тайловый BiRefNet плюс pymatting. Не прерывать. На слабом CPU может быть дольше.
+
+### В вырезке остался замкнутый «пробел»
+
+Если модель оставила внутри объекта прозрачный участок (как на `DSCN1941.jpg` внизу кадра), он восстанавливается по маске цельного кадра: `global_shape_alpha()` и `merge_global_shape()` в `src\core\cutout.py` добавляют только области, где цельный кадр уверенно непрозрачен (>0,9), а тайлы почти прозрачны (<0,5). Цвет берётся из исходника до pymatting, поэтому залитый участок не отличается оттенком. Настоящие зазоры (между руками или ногами), прозрачные и на целом кадре, остаются прозрачными. Если пропуск не восстановился, проверьте альфу цельного кадра — возможно, модель приняла за объект весь нижний фон; в этом случае помогает обрезка кадра перед вырезкой.
 
 ### Ошибка чтения файла с кириллицей
 

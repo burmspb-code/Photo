@@ -124,6 +124,10 @@ QLabel#zoneTitle {
 QLabel#pathLabel {
     color: $path_text;
 }
+QLabel#previewInfo {
+    color: $path_text;
+    font-size: 11px;
+}
 QLabel#preview {
     background: $preview_bg;
     border: 1px solid $preview_border;
@@ -180,7 +184,8 @@ QScrollArea {
     background: $zone_bg;
     border: 0;
 }
-QWidget#paramsViewport, QWidget#paramsContent {
+QWidget#paramsViewport, QWidget#paramsContent,
+QWidget#aboutViewport, QWidget#aboutContent {
     background: $zone_bg;
 }
 QWidget#previewPage {
@@ -324,7 +329,7 @@ QTabBar::tab:selected {
     color: $accent_text;
     font-weight: bold;
 }
-QPushButton#saveCurrent {
+QPushButton#saveCurrent, QPushButton#clearCurrent {
     background: $button_bg;
     border: 1px solid $button_border;
     border-radius: 4px;
@@ -332,10 +337,10 @@ QPushButton#saveCurrent {
     margin: 2px 4px 2px 0;
     color: $text;
 }
-QPushButton#saveCurrent:hover {
+QPushButton#saveCurrent:hover, QPushButton#clearCurrent:hover {
     background: $button_hover;
 }
-QPushButton#saveCurrent:disabled {
+QPushButton#saveCurrent:disabled, QPushButton#clearCurrent:disabled {
     color: $disabled;
     border-color: $zone_bg;
 }

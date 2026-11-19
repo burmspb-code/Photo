@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt
 from PyQt6.QtGui import QMouseEvent, QWheelEvent
-from PyQt6.QtWidgets import QApplication, QLabel, QSplitter
+from PyQt6.QtWidgets import QApplication, QLabel, QPushButton, QSplitter
 
 from src.ui.main_window import PARAMS_WIDTH, ZOOM_MAX, ZOOM_MIN, MainWindow
 from tests.gui_case import GuiTestCase
@@ -175,7 +175,9 @@ class TestMainWindow(GuiTestCase):
 
     def test_save_button_in_tab_row_disabled_for_source_and_empty_tabs(self) -> None:
         button = self.window.btn_save_current
-        self.assertIs(self.window.tabs.cornerWidget(Qt.Corner.TopRightCorner), button)
+        corner = self.window.tabs.cornerWidget(Qt.Corner.TopRightCorner)
+        self.assertIs(corner.findChild(QPushButton, "saveCurrent"), button)
+        self.assertIs(corner.findChild(QPushButton, "clearCurrent"), self.window.btn_clear_current)
         self.assertFalse(button.isEnabled())
 
         self.load_current()  # «Исходник» — сохранение не предусмотрено

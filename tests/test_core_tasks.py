@@ -98,14 +98,26 @@ class TestTasks(unittest.TestCase):
     def test_upscale_task_default_name(self) -> None:
         with patch("src.core.upscale.upscale") as upscale:
             result = tasks.upscale_task(self.dir / "photo.jpg")
-        self.assertEqual(Path(result).name, "photo-4x.jpg")
+        self.assertEqual(Path(result).name, "photo-2x.jpg")
         self.assertEqual(upscale.call_args.args[1], result)
+        self.assertEqual(upscale.call_args.kwargs["factor"], 2)
 
-    def test_upscale_task_removes_old_4x_suffix(self) -> None:
+    def test_upscale_task_factor_4_name_and_forwarding(self) -> None:
         with patch("src.core.upscale.upscale") as upscale:
-            result = tasks.upscale_task(self.dir / "photo-4x.jpg")
+            result = tasks.upscale_task(self.dir / "photo.jpg", options={"factor": 4})
         self.assertEqual(Path(result).name, "photo-4x.jpg")
-        self.assertEqual(upscale.call_args.args[0], self.dir / "photo-4x.jpg")
+        self.assertEqual(upscale.call_args.kwargs["factor"], 4)
+
+    def test_upscale_task_replaces_old_factor_suffix(self) -> None:
+        cases = (
+            ("photo-4x.jpg", "photo-2x.jpg", 2),
+            ("photo-2x.jpg", "photo-4x.jpg", 4),
+        )
+        for old, new, factor in cases:
+            with self.subTest(old=old), patch("src.core.upscale.upscale") as upscale:
+                result = tasks.upscale_task(self.dir / old, options={"factor": factor})
+                self.assertEqual(Path(result).name, new)
+                self.assertEqual(upscale.call_args.args[0], self.dir / old)
 
     def test_compose_task_rejects_image_without_alpha(self) -> None:
         cut = self.dir / "cut.png"

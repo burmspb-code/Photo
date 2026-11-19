@@ -42,7 +42,19 @@ def _model_path(name: str) -> Path:
 
 
 FACE_MODEL = _model_path("faceparser.onnx")
-ESR_MODEL = _model_path("realesr-general-x4v3.onnx")
+ESR_MODEL = _model_path("realesr-general-x4v3.onnx")   # апскейл ×4
+EDSR_X2_MODEL = _model_path("edsr-x2.onnx")            # апскейл ×2
+
+UPSCALE_FACTORS = (2, 4)
+
+
+def normalize_factor(value) -> int:
+    """Кратность апскейла: 2 или 4; всё остальное приводится к 2."""
+    try:
+        factor = int(value)
+    except (TypeError, ValueError):
+        return 2
+    return factor if factor in UPSCALE_FACTORS else 2
 
 HAIR_COLORS = {
     "rusy": (150, 112, 78),

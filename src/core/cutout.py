@@ -150,6 +150,43 @@ def refine_alpha(a_raw, portrait=True, head_ratio=0.34, sigma=1.4):
     return np.clip(a * (1 - w) + _blur(a, sigma) * w, 0, 1)
 
 
+def global_shape_alpha(orig, model=None, cancelled=None):
+    """Ранний H-рецепт: сегментация всего кадра одним проходом модели.
+
+    Тайлы дают детали и лечат отдельные сбойные участки, но на больших кадрах
+    могут «потерять» нижнюю часть объекта. Цельный кадр используется как
+    страховка: он возвращает пропущенные области без изменения цвета (масштаб
+    альфы 8…247, жёсткие пороги и медиана 3 — как в первом рабочем рецепте).
+    """
+    check_cancel(cancelled)
+    buf = cv2.imencode(".png", orig)[1]
+    raw = remove(buf.tobytes(), session=get_session(model), alpha_matting=False)
+    got = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_UNCHANGED)
+    a = got[:, :, 3]
+    if a.shape != orig.shape[:2]:
+        a = cv2.resize(a, (orig.shape[1], orig.shape[0]), interpolation=cv2.INTER_LINEAR)
+    stretch = np.clip((a.astype(np.float32) - 8.0) / (247.0 - 8.0) * 255.0, 0, 255)
+    stretch[stretch >= 250] = 255
+    stretch[stretch <= 5] = 0
+    return cv2.medianBlur(stretch.astype(np.uint8), 3).astype(np.float32) / 255.0
+
+
+def merge_global_shape(alpha, whole, min_fraction=0.001, feather=3.0):
+    """Добавить к тайловой альфе области, уверенно найденные на целом кадре.
+
+    Заполняются только пиксели, где цельный кадр почти непрозрачен (>0,9),
+    а тайлы почти прозрачны (<0,5). Если таких пикселей меньше 0,1 % кадра,
+    маска не меняется — это защищает мелкие артефакты и утверждённый результат.
+    """
+    fill = ((whole > 0.9) & (alpha < 0.5)).astype(np.float32)
+    if float(fill.mean()) < min_fraction:
+        return alpha
+    weight = cv2.GaussianBlur(fill, (0, 0), feather)
+    weight = np.clip(weight * 1.5, 0, 1)[:, :, None]
+    target = whole[:, :, None] * weight
+    return np.clip(alpha[:, :, None] + (1 - alpha[:, :, None]) * target, 0, 1)[:, :, 0]
+
+
 def make_cutout(src, portrait=True, model=None, tile=1024, sigma=1.4, head_ratio=0.34,
                 matting=True, progress=None, cancelled=None):
     maybe_report(progress, 0, "Чтение изображения")
@@ -159,8 +196,11 @@ def make_cutout(src, portrait=True, model=None, tile=1024, sigma=1.4, head_ratio
     orig = orig[:, :, :3]
     raw = tiled_alpha(orig, tile=tile, model=model,
                       progress=scaled(progress, 0, 70), cancelled=cancelled)
+    maybe_report(progress, 72, "Проверка целого кадра")
+    whole = global_shape_alpha(orig, model=model, cancelled=cancelled)
     maybe_report(progress, 75, "Уточнение кромки")
     alpha = refine_alpha(raw, portrait=portrait, head_ratio=head_ratio, sigma=sigma)
+    alpha = merge_global_shape(alpha, whole)
     check_cancel(cancelled)
     if matting:
         maybe_report(progress, 85, "Восстановление цвета")

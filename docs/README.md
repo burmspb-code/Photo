@@ -7,6 +7,7 @@
 - **Утверждённый результат:** `data/results/2026-11-17-park-c/final.jpg` (2026-11-17, вариант C). Карточка — [04-result-2026-11-17-park-c.md](04-result-2026-11-17-park-c.md), папка — [data/results/2026-11-17-park-c](../data/results/2026-11-17-park-c/README.md).
 - **Исходник:** `C:\Users\bur_s\OneDrive\Изображения\DSC00103.JPG` (1632×1224).
 - **Фон:** Cloudflare Workers AI, FLUX.1-schnell, затем апскейл ×4.
+- **Сейчас:** ручной апскейл в GUI по умолчанию ×2 (EDSR); ×4 доступен во вкладке настроек `Апскейл`. Внутренняя доводка размеров фона осталась на ×4 — подробности в [06-development.md](06-development.md#кратность-апскейла).
 - Пользователь оценил результат положительно; правки не требуются.
 - Перекраска волос в задачу не входила.
 - **На будущее:** выбирать фоны без видимого источника света — иначе тени композита не совпадают с освещением лица (см. [03-backgrounds.md](03-backgrounds.md#правило-выбора-фона-по-свету)).
@@ -21,6 +22,7 @@
 | [04-result-2026-11-17-park-c.md](04-result-2026-11-17-park-c.md) | Карточка утверждённого результата: параметры, команды, хеши |
 | [05-troubleshooting.md](05-troubleshooting.md) | Типичные ошибки и что с ними делать |
 | [06-development.md](06-development.md) | PyCharm, Poetry, `.venv` и резервное окружение `rembg-env` |
+| [07-market-analysis.md](07-market-analysis.md) | Аналоги на рынке, цены и лимиты, конкурентные преимущества и ограничения |
 
 ## Структура проекта
 
@@ -78,11 +80,11 @@ Set-Location $root
 # 2. Черновик фона (Cloudflare, бесплатно)
 & $py $pp genbg "photorealistic quiet park, soft overcast light, no people" "$data\bg\park-draft.jpg" --provider cloudflare --no-upscale
 
-# 3. Апскейл ×4
-& $py $pp upscale "$data\bg\park-draft.jpg" "$data\bg\park-draft-4x.jpg"
+# 3. Апскейл ×2 (EDSR); для ×4 добавьте --factor 4
+& $py $pp upscale "$data\bg\park-draft.jpg" "$data\bg\park-draft-2x.jpg" --factor 2
 
 # 4. Композит
-& $py $pp composite "$data\DSC00103-cut.png" "$data\bg\park-draft-4x.jpg" "$data\DSC00103-park.jpg" --blur 0.5
+& $py $pp composite "$data\DSC00103-cut.png" "$data\bg\park-draft-2x.jpg" "$data\DSC00103-park.jpg" --blur 0.5
 ```
 
 `$py` — `.venv` проекта: зависимости установлены Poetry. Если `.venv` недоступен, плагин и команды можно запускать python из `%LOCALAPPDATA%\rembg-env`. Подробнее — [06-development.md](06-development.md).

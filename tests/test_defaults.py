@@ -26,6 +26,8 @@ class TestDefaults(GuiTestCase):
         self.assertEqual(APP_DEFAULTS["compose/tone"], 1.06)
         self.assertEqual(APP_DEFAULTS["compose/grain"], 4.5)
         self.assertEqual(APP_DEFAULTS["compose/seed"], 7)
+        self.assertEqual(APP_DEFAULTS["upscale/factor"], 2)
+        self.assertNotIn("models/upscale", APP_DEFAULTS)
         self.assertNotEqual(APP_DEFAULTS["cut/model"], "u2netp")
 
     def test_apply_writes_all_presets_once(self) -> None:
@@ -37,6 +39,13 @@ class TestDefaults(GuiTestCase):
 
         # Повторный запуск ничего не меняет.
         self.assertFalse(apply_default_presets(app_settings()))
+
+    def test_apply_removes_legacy_upscale_model(self) -> None:
+        stored = app_settings()
+        stored.setValue("models/upscale", "realesr-general-x4v3")
+        stored.sync()
+        apply_default_presets(stored)
+        self.assertIsNone(stored.value("models/upscale"))
 
     def test_apply_overwrites_stale_values(self) -> None:
         stored = app_settings()

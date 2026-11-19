@@ -27,7 +27,8 @@ from PyQt6.QtWidgets import (
 
 from src.core.sizes import SIZE_ORDER
 
-from .defaults import APP_DEFAULTS
+from .defaults import APP_DEFAULTS, PROMPT_PLACEHOLDER
+from .native_titlebar import apply_dark_titlebar, theme_is_dark
 
 CUT_MODELS = (
     "birefnet-general",
@@ -54,6 +55,7 @@ PROVIDER_INFO = {
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._dark_titlebar = theme_is_dark(parent)
         self.settings = QSettings("Photo", "Photo")
         self.controls: dict[str, QWidget] = {}
         self.defaults: dict[str, object] = {}
@@ -68,6 +70,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._cut_tab(), "Вырезка")
         tabs.addTab(self._background_tab(), "Фон")
         tabs.addTab(self._compose_tab(), "Композит")
+        tabs.addTab(self._upscale_tab(), "Апскейл")
         tabs.addTab(self._paths_tab(), "Пути")
         tabs.addTab(self._common_tab(), "Общие")
         layout.addWidget(tabs)
@@ -82,6 +85,15 @@ class SettingsDialog(QDialog):
         # Подключаем после создания всех вкладок: слот обновляет обе метки.
         self.controls["bg/provider_api"].currentTextChanged.connect(self._update_provider_info)
         self._load()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        apply_dark_titlebar(self, self._dark_titlebar)
+
+    @property
+    def prompt_text(self) -> str:
+        """Введённый промпт (подсказка в текст не входит)."""
+        return str(self.controls["bg/prompt"].toPlainText()).strip()
 
     def _add(self, form: QFormLayout, key: str, label: str, widget: QWidget, default) -> QWidget:
         form.addRow(label, widget)
@@ -144,10 +156,6 @@ class SettingsDialog(QDialog):
         cut = QGroupBox("Локальные модели")
         form = QFormLayout(cut)
         self._add(form, "cut/model", "Модель вырезки", self._combo(CUT_MODELS), CUT_MODELS[0])
-        self._add(
-            form, "models/upscale", "Модель апскейла",
-            self._combo(["realesr-general-x4v3", "—"]), "realesr-general-x4v3",
-        )
         layout.addWidget(cut)
 
         cloud = QGroupBox("Фон (провайдер API)")
@@ -170,7 +178,8 @@ class SettingsDialog(QDialog):
         status = QGroupBox("Статус")
         form = QFormLayout(status)
         form.addRow("birefnet-general:", QLabel("кэш rembg, ~928 МБ"))
-        form.addRow("realesr-general-x4v3:", QLabel("models\\, 4,6 МБ"))
+        form.addRow("edsr-x2:", QLabel("models\\, 5,5 МБ (апскейл ×2)"))
+        form.addRow("realesr-general-x4v3:", QLabel("models\\, 4,6 МБ (апскейл ×4)"))
         form.addRow("faceparser:", QLabel("models\\, 50,7 МБ (в задаче не используется)"))
         layout.addWidget(status)
         layout.addStretch()
@@ -191,11 +200,12 @@ class SettingsDialog(QDialog):
         page = QWidget()
         form = QFormLayout(page)
         prompt = QPlainTextEdit()
+        prompt.setPlaceholderText(PROMPT_PLACEHOLDER)
         prompt.setFixedHeight(80)
-        self._add(
-            form, "bg/prompt", "Промпт", prompt,
-            "realistic photo, no people, no text, soft overcast light",
-        )
+        # Без Fixed по вертикали QFormLayout растягивает все строки под
+        # Expanding-поле, и параметры оказываются разнесены большими пустотами.
+        prompt.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self._add(form, "bg/prompt", "Промпт", prompt, "")
         generate = QPushButton("Сгенерировать фон")
         generate.setObjectName("settingsGenerate")
         generate.setToolTip("Применить настройки и сразу сгенерировать фон")
@@ -209,8 +219,6 @@ class SettingsDialog(QDialog):
         self.background_model.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.background_model.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         form.addRow("Модель:", self.background_model)
-        self._add(form, "bg/drafts", "Число черновиков", self._spin(1, 12), 3)
-        self._add(form, "bg/aspect", "Соотношение сторон", self._combo(["4:3", "3:2", "1:1", "16:9"]), "4:3")
         self._add(form, "bg/seed", "Seed", self._spin(0, 999999), 7)
         self._add(form, "bg/size", "Размер фона", self._combo(SIZE_ORDER), "2K")
         return page
@@ -223,6 +231,24 @@ class SettingsDialog(QDialog):
         self._add(form, "compose/tone", "Подгонка яркости", self._double(0.8, 1.3, 0.01, 2), 1.06)
         self._add(form, "compose/grain", "Зерно", self._double(0.0, 12.0, 0.5, 1), 4.5)
         self._add(form, "compose/seed", "Seed", self._spin(0, 999999), 7)
+        return page
+
+    def _upscale_tab(self) -> QWidget:
+        page = QWidget()
+        form = QFormLayout(page)
+        combo = QComboBox()
+        combo.addItem("×2 — EDSR (быстро, мелкие детали)", 2)
+        combo.addItem("×4 — Real-ESRGAN (утверждённый стиль)", 4)
+        self._add(form, "upscale/factor", "Кратность", combo, APP_DEFAULTS["upscale/factor"])
+        note = QLabel(
+            "×2 — EDSR (5,5 МБ): быстрее и лучше сохраняет мелкие детали; "
+            "рекомендуемый режим.\n"
+            "×4 — realesr-general-x4v3 (4,6 МБ): стиль утверждённого результата.\n"
+            "На этом кадре ×2 увеличивает стороны исходника вдвое, ×4 — вчетверо.\n"
+            "Внутренняя обработка фонов использует ×4 независимо от этой настройки."
+        )
+        note.setWordWrap(True)
+        form.addRow(note)
         return page
 
     def _paths_tab(self) -> QWidget:
@@ -247,6 +273,11 @@ class SettingsDialog(QDialog):
         form = QFormLayout(page)
         self._add(form, "ui/language", "Язык", self._combo(["Русский"]), "Русский")
         self._add(form, "ui/log_level", "Уровень лога", self._combo(["INFO", "WARN", "ERROR", "DEBUG"]), "INFO")
+        hints = self._add(
+            form, "ui/hints", "Подсказки в инфоокне", QCheckBox(),
+            APP_DEFAULTS["ui/hints"],
+        )
+        hints.setToolTip("Советы о следующем шаге в нижнем окне сообщений ([HINT])")
         reset = QPushButton("Сбросить настройки")
         reset.clicked.connect(self._reset)
         form.addRow(reset)
@@ -258,7 +289,14 @@ class SettingsDialog(QDialog):
             if isinstance(widget, QCheckBox):
                 widget.setChecked(self.settings.value(key, default, type=bool))
             elif isinstance(widget, QComboBox):
-                index = widget.findText(str(self.settings.value(key, default)))
+                value = self.settings.value(key, default)
+                if widget.itemData(0) is None:
+                    index = widget.findText(str(value))
+                else:
+                    try:
+                        index = widget.findData(int(value))
+                    except (TypeError, ValueError):
+                        index = -1
                 if index >= 0:
                     widget.setCurrentIndex(index)
             elif isinstance(widget, QDoubleSpinBox):
@@ -266,7 +304,9 @@ class SettingsDialog(QDialog):
             elif isinstance(widget, QSpinBox):
                 widget.setValue(int(self.settings.value(key, default)))
             elif isinstance(widget, QPlainTextEdit):
-                widget.setPlainText(str(self.settings.value(key, default)))
+                # Промпт не сохраняется между запусками — в поле всегда подсказка.
+                if key != "bg/prompt":
+                    widget.setPlainText(str(self.settings.value(key, default)))
             elif isinstance(widget, QLabel):
                 widget.setText(str(self.settings.value(key, default)))
             else:
@@ -275,10 +315,16 @@ class SettingsDialog(QDialog):
 
     def _save(self) -> None:
         for key, widget in self.controls.items():
+            if key == "bg/prompt":
+                continue  # одноразовый ввод, не настройка
             if isinstance(widget, QCheckBox):
                 value = widget.isChecked()
-            elif isinstance(widget, (QComboBox, QLabel)):
-                value = widget.currentText() if isinstance(widget, QComboBox) else widget.text()
+            elif isinstance(widget, QComboBox):
+                # Combo с данными (кратность апскейла) сохраняет число, а не подпись.
+                data = widget.currentData()
+                value = data if data is not None else widget.currentText()
+            elif isinstance(widget, QLabel):
+                value = widget.text()
             elif isinstance(widget, (QSpinBox, QDoubleSpinBox)):
                 value = widget.value()
             elif isinstance(widget, QPlainTextEdit):
@@ -286,6 +332,7 @@ class SettingsDialog(QDialog):
             else:
                 value = widget.text()
             self.settings.setValue(key, value)
+        self.settings.remove("bg/prompt")  # удалить текст прошлой генерации
         self.settings.sync()
         self.accept()
 
