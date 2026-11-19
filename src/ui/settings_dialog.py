@@ -28,8 +28,10 @@ from PyQt6.QtWidgets import (
 
 from src.core.sizes import SIZE_ORDER
 
+from .animated_combo import AnimatedComboBox
 from .defaults import APP_DEFAULTS, CUT_MODELS, CUT_MODEL_HINTS, CUT_MODEL_PREVIEW, PROMPT_PLACEHOLDER
 from .native_titlebar import apply_dark_titlebar, theme_is_dark
+from .styles import THEME_WINDOW_COLORS
 
 PROVIDERS = ("cloudflare", "google", "stability", "huggingface", "pollinations")
 
@@ -79,7 +81,8 @@ class SettingsDialog(QDialog):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        apply_dark_titlebar(self, self._dark_titlebar)
+        theme = "Тёмная" if self._dark_titlebar else "Светлая"
+        apply_dark_titlebar(self, self._dark_titlebar, THEME_WINDOW_COLORS[theme])
 
     @property
     def prompt_text(self) -> str:
@@ -94,7 +97,7 @@ class SettingsDialog(QDialog):
 
     @staticmethod
     def _combo(items, current=None) -> QComboBox:
-        combo = QComboBox()
+        combo = AnimatedComboBox()
         combo.addItems(items)
         if current is not None:
             combo.setCurrentText(current)
@@ -367,7 +370,7 @@ class SettingsDialog(QDialog):
     def _upscale_tab(self) -> QWidget:
         page = QWidget()
         form = QFormLayout(page)
-        combo = QComboBox()
+        combo = AnimatedComboBox()
         combo.addItem("×2 — EDSR (быстро, мелкие детали)", 2)
         combo.addItem("×4 — Real-ESRGAN (утверждённый стиль)", 4)
         self._add(form, "upscale/factor", "Кратность", combo, APP_DEFAULTS["upscale/factor"])
@@ -421,13 +424,17 @@ class SettingsDialog(QDialog):
                 widget.setChecked(self.settings.value(key, default, type=bool))
             elif isinstance(widget, QComboBox):
                 value = self.settings.value(key, default)
-                if widget.itemData(0) is None:
-                    index = widget.findText(str(value))
-                else:
+                # Данные в комбо бывают двух видов: число (кратность апскейла)
+                # или строка-подсказка (модели вырезки). Раньше проверяли
+                # ``itemData(0) is None``, и подсказки ломали восстановление:
+                # int('birefnet-portrait') падал, выбор сбрасывался на дефолт.
+                if isinstance(widget.itemData(0), int):
                     try:
                         index = widget.findData(int(value))
                     except (TypeError, ValueError):
                         index = -1
+                else:
+                    index = widget.findText(str(value))
                 if index >= 0:
                     widget.setCurrentIndex(index)
             elif isinstance(widget, QDoubleSpinBox):

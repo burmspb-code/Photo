@@ -147,12 +147,14 @@ Set-Location "C:\My_projects\Photo"
 
 ```text
 src\ui\
+├── animated_combo.py   AnimatedComboBox: плавное открытие popup (fade, без сдвига)
 ├── defaults.py         проверенные предустановки и однократная миграция
 ├── main_window.py      окно: меню, тулбар, три зоны, вкладки предпросмотра
 ├── settings_dialog.py  диалог настроек (7 вкладок, сохранение в QSettings,
 │                       сводка провайдера/модели, кнопка генерации)
 ├── workers.py          CoreWorker: QThread, прогресс, результат, отмена
-└── styles.py           тёмная и светлая QSS-темы
+├── styles.py           тёмная и светлая QSS-темы
+└── icons\              PNG: галочка чекбокса, стрелки комбо и спинбоксов (2 темы)
 ```
 
 Окно безрамочное (`FramelessWindowHint`). Кнопки `─` (свернуть), `□/❐` (развернуть/восстановить) и `✕` (закрыть) находятся справа в строке меню — это `cornerWidget(TopRightCorner)` у `QMenuBar`. Окно можно перетаскивать за пустое место в строке меню. Растягивание мышью работает нативно через `WM_NCHITTEST` в `MainWindow.nativeEvent()` — курсоры и поведение краёв стандартные для Windows. Углы окна скруглены радиусом 10 px (`QRegion`-маска плюс `DWMWA_WINDOW_CORNER_PREFERENCE`); в развёрнутом состоянии маска снимается.

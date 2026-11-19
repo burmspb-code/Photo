@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QTabWidget, QWidg
 from src.ui.about_dialog import HELP_GROUPS, AboutDialog, _default_text, _render_help
 from src.ui.main_window import MainWindow
 from src.ui.settings_dialog import SettingsDialog
-from src.ui.styles import THEMES
+from src.ui.styles import THEMES, THEME_WINDOW_COLORS
 from tests.gui_case import GuiTestCase
 
 
@@ -82,16 +82,16 @@ class TestAboutDialog(GuiTestCase):
              patch("src.ui.settings_dialog.apply_dark_titlebar") as settings_dwm:
             about = AboutDialog(self.window)
             about.showEvent(QShowEvent())
-            about_dwm.assert_called_once_with(about, True)
+            about_dwm.assert_called_once_with(about, True, THEME_WINDOW_COLORS["Тёмная"])
 
             self.window._apply_theme("Светлая")
             light_about = AboutDialog(self.window)
             light_about.showEvent(QShowEvent())
-            about_dwm.assert_called_with(light_about, False)
+            about_dwm.assert_called_with(light_about, False, THEME_WINDOW_COLORS["Светлая"])
 
             settings = SettingsDialog(self.window)
             settings.showEvent(QShowEvent())
-            settings_dwm.assert_called_once_with(settings, False)
+            settings_dwm.assert_called_once_with(settings, False, THEME_WINDOW_COLORS["Светлая"])
 
         self.window._apply_theme("Тёмная")
 

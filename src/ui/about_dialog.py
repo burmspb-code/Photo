@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
 
 from .defaults import APP_DEFAULTS
 from .native_titlebar import apply_dark_titlebar, theme_is_dark
+from .styles import THEME_WINDOW_COLORS
 
 APP_TITLE = "Photo — замена фона на фотографии"
 
@@ -763,5 +764,6 @@ class AboutDialog(QDialog):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        # HWND уже создан — красим системную шапку под выбранную тему.
-        apply_dark_titlebar(self, self._dark_titlebar)
+        # HWND уже создан — красим системную шапку в точный цвет фона темы.
+        theme = "Тёмная" if self._dark_titlebar else "Светлая"
+        apply_dark_titlebar(self, self._dark_titlebar, THEME_WINDOW_COLORS[theme])

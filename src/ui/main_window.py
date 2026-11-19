@@ -53,7 +53,6 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
-    QComboBox,
     QDialog,
     QFileDialog,
     QFrame,
@@ -92,6 +91,7 @@ from .defaults import (
     CUT_MODEL_PREVIEW,
     PROMPT_PLACEHOLDER,
 )
+from .animated_combo import AnimatedComboBox
 from .settings_dialog import SettingsDialog
 from .styles import THEMES
 from .workers import CoreWorker
@@ -1034,7 +1034,7 @@ class MainWindow(QMainWindow):
         cut.setObjectName("taskCut")
         box = QVBoxLayout(cut)
         box.addWidget(QLabel("Модель:"))
-        self.cut_model = QComboBox()
+        self.cut_model = AnimatedComboBox()
         self.cut_model.addItems(CUT_MODELS)
         for index, name in enumerate(CUT_MODELS):
             self.cut_model.setItemData(index, CUT_MODEL_HINTS[name], Qt.ItemDataRole.ToolTipRole)
