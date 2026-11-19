@@ -44,6 +44,7 @@ def cut_task(source, out=None, *, options=None, progress=None, cancelled=None) -
         matting=bool(params.get("matting", True)),
         progress=scaled(progress, 5, 90),
         cancelled=cancelled,
+        params=params,
     )
     check_cancel(cancelled)
     maybe_report(progress, 95, "Сохранение вырезки")

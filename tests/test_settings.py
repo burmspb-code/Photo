@@ -1,10 +1,18 @@
 """Тесты диалога настроек и чтения настроек главным окном."""
 from __future__ import annotations
 
-from PyQt6.QtWidgets import QFormLayout, QSizePolicy, QTabWidget
+import re
+from collections import Counter
+from pathlib import Path
 
+from PyQt6.QtCore import QPoint
+from PyQt6.QtGui import QColor, QImage
+from PyQt6.QtWidgets import QFormLayout, QScrollArea, QSizePolicy, QTabWidget
+
+from src.core.cut_params import CUT_DEFAULTS
 from src.ui.main_window import CUT_MODELS, MainWindow
 from src.ui.settings_dialog import SettingsDialog
+from src.ui.styles import THEMES
 from tests.gui_case import GuiTestCase, app_settings
 
 
@@ -47,6 +55,111 @@ class TestSettingsDialog(GuiTestCase):
         dialog = SettingsDialog()
         self.assertNotIn("bg/drafts", dialog.controls)
         self.assertNotIn("bg/aspect", dialog.controls)
+
+    def test_cut_tab_exposes_every_tunable(self) -> None:
+        dialog = SettingsDialog()
+        try:
+            for key in CUT_DEFAULTS:
+                self.assertIn(f"cut/{key}", dialog.controls, key)
+            self.assertIn("cut/model", dialog.controls)
+            self.assertIn("cut/format", dialog.controls)
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self.process_events()
+
+    def test_cut_content_background_follows_theme(self) -> None:
+        # QSS задаёт фон через objectName; без него вьюпорт остаётся системным
+        # светлым и светлый текст тёмной темы становится нечитаемым.
+        dialog = SettingsDialog()
+        try:
+            scroll = dialog.findChild(QScrollArea)
+            viewport = scroll.viewport()
+            content = scroll.widget()
+            self.assertEqual(viewport.objectName(), "settingsCutViewport")
+            self.assertEqual(content.objectName(), "settingsCutContent")
+            for theme in THEMES:
+                with self.subTest(theme=theme):
+                    self.assertIn(f"QWidget#{viewport.objectName()}", THEMES[theme])
+                    self.assertIn(f"QWidget#{content.objectName()}", THEMES[theme])
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self.process_events()
+
+    def test_checkbox_styles_are_explicit_in_both_themes(self) -> None:
+        for theme, qss in THEMES.items():
+            with self.subTest(theme=theme):
+                self.assertNotIn("$", qss)  # все плейсхолдеры подставлены
+                for state in ("checked", "hover", "disabled"):
+                    self.assertIn(f"QCheckBox::indicator:{state}", qss)
+        match = re.search(r'image: url\("([^"]+)"\)', THEMES["Тёмная"])
+        self.assertIsNotNone(match)
+        self.assertTrue(Path(match.group(1)).is_file(), match.group(1))
+
+    def test_checkbox_indicator_contrast_in_both_themes(self) -> None:
+        window = MainWindow()
+        try:
+            for theme in THEMES:
+                with self.subTest(theme=theme):
+                    window._apply_theme(theme)
+                    dialog = SettingsDialog(window)
+                    try:
+                        dialog.show()
+                        dialog.findChild(QTabWidget).setCurrentIndex(1)
+                        self.process_events()
+                        box = dialog.controls["cut/portrait"]
+                        pos = box.mapTo(dialog, QPoint(0, 0))
+                        for checked in (True, False):
+                            box.setChecked(checked)
+                            self.process_events()
+                            image = QImage(dialog.size(), QImage.Format.Format_ARGB32)
+                            image.fill(QColor(0, 0, 0, 0))
+                            dialog.render(image)
+                            colors = Counter()
+                            for y in range(pos.y(), min(pos.y() + box.height(), image.height())):
+                                for x in range(pos.x(), min(pos.x() + 12, image.width())):
+                                    c = QColor(image.pixelColor(x, y))
+                                    if c.alpha():
+                                        colors[(c.red(), c.green(), c.blue())] += 1
+                            self.assertTrue(colors, theme)
+                            dominant = colors.most_common(1)[0][0]
+                            if checked:
+                                # Отмеченная клетка — насыщенный синий, галочка белая.
+                                self.assertGreater(dominant[2], dominant[0] + 100)
+                                brightest = max(colors, key=sum)
+                                self.assertGreater(sum(brightest), sum(dominant) + 100)
+                            elif theme == "Светлая":
+                                self.assertTrue(all(v > 200 for v in dominant), dominant)
+                            else:
+                                self.assertTrue(all(v < 60 for v in dominant), dominant)
+                    finally:
+                        dialog.close()
+                        dialog.deleteLater()
+                        self.process_events()
+        finally:
+            window.close()
+            window.deleteLater()
+            self.process_events()
+
+    def test_cut_settings_reach_main_window_params(self) -> None:
+        stored = app_settings()
+        stored.setValue("cut/isolated_ratio", 0.15)
+        stored.setValue("cut/isolated", False)
+        stored.setValue("cut/overlap", 0.75)
+        stored.sync()
+        window = MainWindow()
+        try:
+            params = window.current_params()
+            self.assertEqual(params["isolated_ratio"], 0.15)
+            self.assertIs(params["isolated"], False)
+            self.assertEqual(params["overlap"], 0.75)
+            for key in CUT_DEFAULTS:
+                self.assertIn(key, params)
+        finally:
+            window.close()
+            window.deleteLater()
+            self.process_events()
 
     def test_upscale_factor_combo_saves_number_and_loads_it(self) -> None:
         dialog = SettingsDialog()

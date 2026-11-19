@@ -7,7 +7,7 @@ from unittest.mock import patch
 import cv2
 import numpy as np
 
-from src.core.cutout import global_shape_alpha, merge_global_shape
+from src.core.cutout import global_shape_alpha, merge_global_shape, stabilize_alpha
 
 
 class TestGlobalShapeAlpha(unittest.TestCase):
@@ -63,6 +63,39 @@ class TestMergeGlobalShape(unittest.TestCase):
         out = merge_global_shape(alpha, whole)
 
         np.testing.assert_array_equal(out, alpha)
+
+
+class TestStabilizeAlpha(unittest.TestCase):
+    def test_clean_alpha_is_not_touched(self) -> None:
+        alpha = np.zeros((100, 100), np.float32)
+        alpha[10:90, 10:90] = 1.0
+        alpha[40:44, 40:44] = 0.6  # 1,3 % кадра — ниже порога 3 %
+
+        out = stabilize_alpha(alpha)
+
+        np.testing.assert_array_equal(out, alpha)
+
+    def test_speckled_background_is_removed(self) -> None:
+        alpha = np.zeros((300, 300), np.float32)
+        alpha[100:200, 100:200] = 1.0
+        alpha[::5, ::5] = 0.6  # мелкие островки вне объекта
+
+        out = stabilize_alpha(alpha)
+
+        self.assertEqual(float(out[10, 10]), 0.0)
+        self.assertEqual(float(out[150, 150]), 1.0)
+        self.assertLess(float(((out > 0.05) & (out < 0.95)).mean()), 0.05)
+
+    def test_gap_inside_silhouette_becomes_opaque(self) -> None:
+        alpha = np.zeros((200, 200), np.float32)
+        alpha[20:180, 20:180] = 1.0
+        alpha[80:130, 80:140] = 0.6  # 5 % кадра, одна компонента
+
+        out = stabilize_alpha(alpha)
+
+        self.assertEqual(float(out[100, 100]), 1.0)
+        self.assertEqual(float(out[30, 30]), 1.0)
+        self.assertEqual(float(out[5, 5]), 0.0)
 
 
 if __name__ == "__main__":

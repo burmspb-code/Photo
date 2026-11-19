@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSpinBox,
     QTabWidget,
@@ -27,19 +28,9 @@ from PyQt6.QtWidgets import (
 
 from src.core.sizes import SIZE_ORDER
 
-from .defaults import APP_DEFAULTS, PROMPT_PLACEHOLDER
+from .defaults import APP_DEFAULTS, CUT_MODELS, CUT_MODEL_HINTS, CUT_MODEL_PREVIEW, PROMPT_PLACEHOLDER
 from .native_titlebar import apply_dark_titlebar, theme_is_dark
 
-CUT_MODELS = (
-    "birefnet-general",
-    "birefnet-portrait",
-    "birefnet-general-lite",
-    "birefnet-general-fp16",
-    "birefnet-massive",
-    "isnet-general-use",
-    "u2net",
-    "u2netp",
-)
 PROVIDERS = ("cloudflare", "google", "stability", "huggingface", "pollinations")
 
 # Модели по умолчанию совпадают с вызовами в src.core.backgrounds.genbg().
@@ -155,7 +146,7 @@ class SettingsDialog(QDialog):
 
         cut = QGroupBox("Локальные модели")
         form = QFormLayout(cut)
-        self._add(form, "cut/model", "Модель вырезки", self._combo(CUT_MODELS), CUT_MODELS[0])
+        form.addRow("Модель вырезки:", QLabel("на вкладке «Вырезка» или на панели задач"))
         layout.addWidget(cut)
 
         cloud = QGroupBox("Фон (провайдер API)")
@@ -177,7 +168,14 @@ class SettingsDialog(QDialog):
 
         status = QGroupBox("Статус")
         form = QFormLayout(status)
-        form.addRow("birefnet-general:", QLabel("кэш rembg, ~928 МБ"))
+        sizes = {
+            "birefnet-general": "~928 МБ",
+            "birefnet-portrait": "~928 МБ",
+            "isnet-general-use": "~170 МБ",
+            "u2netp": "~4 МБ (превью)",
+        }
+        for name in CUT_MODELS:
+            form.addRow(f"{name}:", QLabel(f"кэш rembg, {sizes.get(name, '—')}"))
         form.addRow("edsr-x2:", QLabel("models\\, 5,5 МБ (апскейл ×2)"))
         form.addRow("realesr-general-x4v3:", QLabel("models\\, 4,6 МБ (апскейл ×4)"))
         form.addRow("faceparser:", QLabel("models\\, 50,7 МБ (в задаче не используется)"))
@@ -185,14 +183,147 @@ class SettingsDialog(QDialog):
         layout.addStretch()
         return page
 
+    @staticmethod
+    def _section(form: QFormLayout, title: str) -> None:
+        """Заголовок группы внутри одной формы (занимает обе колонки)."""
+        label = QLabel(title)
+        label.setStyleSheet("font-weight: bold; padding-top: 8px;")
+        form.addRow(label)
+
     def _cut_tab(self) -> QWidget:
         page = QWidget()
-        form = QFormLayout(page)
+        outer = QVBoxLayout(page)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        # Без objectName Qt рисует вьюпорт/контент системным светлым цветом:
+        # в тёмной теме светлый текст на нём нечитаем (та же ошибка, что была
+        # в «О программе» и на панели параметров).
+        scroll.viewport().setObjectName("settingsCutViewport")
+        content = QWidget()
+        content.setObjectName("settingsCutContent")
+        form = QFormLayout(content)
+        outer.addWidget(scroll)
+        scroll.setWidget(content)
+
+        self._section(form, "Модель и тайлы")
+        model_combo = self._combo(CUT_MODELS)
+        for index, name in enumerate(CUT_MODELS):
+            model_combo.setItemData(index, CUT_MODEL_HINTS[name], Qt.ItemDataRole.ToolTipRole)
+        model_combo.setToolTip(
+            f"{CUT_MODEL_PREVIEW} — только для быстрого предпросмотра."
+        )
+        self._add(form, "cut/model", "Модель вырезки", model_combo, CUT_MODELS[0])
         self._add(form, "cut/portrait", "Портретный режим", QCheckBox(), True)
         self._add(form, "cut/tile", "Размер тайла", self._spin(256, 2048, 128), 1024)
+        self._add(form, "cut/overlap", "Перекрытие тайлов", self._double(0.1, 0.9, 0.05, 2), 0.5).setToolTip(
+            "Доля перекрытия соседних тайлов: больше — меньше швов, но дольше."
+        )
+
+        self._section(form, "Кромка")
         self._add(form, "cut/sigma", "Мягкость кромки (sigma)", self._double(0.2, 4.0, 0.1, 2), 1.4)
         self._add(form, "cut/head_ratio", "Доля головы", self._double(0.1, 0.8, 0.02, 2), 0.34)
+        self._add(form, "cut/levels_lo", "Уровень альфы: низ", self._double(0.0, 0.5, 0.01, 2), 0.10)
+        self._add(form, "cut/levels_hi", "Уровень альфы: верх", self._double(0.5, 1.0, 0.01, 2), 0.90)
+        self._add(form, "cut/detail_gain", "Усиление деталей", self._double(0.0, 20.0, 0.5, 1), 7.0)
+        self._add(form, "cut/detail_blur", "Размытие деталей", self._double(0.5, 10.0, 0.5, 1), 2.5)
+        self._add(form, "cut/detail_weight", "Вес деталей", self._double(0.0, 1.0, 0.05, 2), 0.6)
+        self._add(form, "cut/head_blur", "Размытие головы", self._double(1.0, 20.0, 1.0, 0), 6.0)
+        self._add(form, "cut/head_weight", "Вес головы", self._double(0.0, 1.0, 0.05, 2), 0.6)
         self._add(form, "cut/matting", "Pymatting", QCheckBox(), True)
+
+        self._section(form, "Цельный кадр (страховка)")
+        self._add(form, "cut/global_shape", "Учитывать цельный кадр", QCheckBox(), True)
+        widget = self._add(
+            form, "cut/global_min_fraction", "Мин. доля добавления",
+            self._double(0.0001, 0.02, 0.0001, 4), 0.001,
+        )
+        widget.setToolTip("Если цельный кадр предлагает добавить меньше этой доли пикселей, маска не меняется.")
+        self._add(form, "cut/global_feather", "Растушёвка добавления", self._double(0.5, 10.0, 0.5, 1), 3.0)
+
+        self._section(form, "Стабилизация альфы")
+        self._add(form, "cut/stabilize", "Стабилизировать маску", QCheckBox(), True)
+        widget = self._add(
+            form, "cut/stabilize_min_mid", "Порог полупрозрачных",
+            self._double(0.0, 0.3, 0.01, 2), 0.03,
+        )
+        widget.setToolTip("Ниже этой доли полупрозрачных пикселей маска не меняется вообще.")
+        self._add(form, "cut/stabilize_noisy_mid", "Порог шума", self._double(0.0, 0.5, 0.01, 2), 0.10)
+        self._add(form, "cut/stabilize_min_comps", "Порог числа компонент", self._spin(0, 500, 5), 50)
+        self._add(form, "cut/stabilize_keep_ratio", "Доля крупных островков", self._double(0.001, 0.2, 0.005, 3), 0.02)
+        self._add(form, "cut/stabilize_dilate", "Дилатация поддержки", self._spin(1, 31, 2), 7)
+        self._add(form, "cut/stabilize_inner", "Внутренний радиус", self._spin(0, 20, 1), 3)
+
+        self._section(form, "Обособленные элементы")
+        self._add(form, "cut/isolated", "Удалять обособленные", QCheckBox(), True)
+        widget = self._add(
+            form, "cut/isolated_ratio", "Макс. доля от силуэта",
+            self._double(0.005, 0.3, 0.005, 3), 0.15,
+        )
+        widget.setToolTip("Удаляются компоненты мельче этой доли от площади основного силуэта.")
+        self._add(form, "cut/isolated_gap", "Мин. зазор, px", self._spin(4, 200, 4), 24).setToolTip(
+            "При этом компоненты должны быть отделены от силуэта хотя бы на это расстояние."
+        )
+        self._add(form, "cut/isolated_halo", "Ореол удаления, px", self._spin(4, 80, 4), 32).setToolTip(
+            "Насколько широко гасится альфа вокруг удалённой компоненты."
+        )
+
+        self._section(form, "Замкнутые пустоты")
+        self._add(form, "cut/fill_holes", "Заливать верхние дыры", QCheckBox(), True).setToolTip(
+            "Заливает мелкие замкнутые остатки фона в верхней части силуэта (сквозь волосы)."
+        )
+        self._add(form, "cut/hole_min_area", "Мин. площадь, px", self._spin(50, 2000, 50), 250).setToolTip(
+            "Более мелкие дырочки относятся к деталям силуэта и не заливаются."
+        )
+        self._add(form, "cut/hole_max_area", "Макс. площадь, px", self._spin(200, 100000, 1000), 60000).setToolTip(
+            "Более крупные замкнутые пустоты считаются частью формы и не заливаются."
+        )
+        self._add(
+            form, "cut/hole_top_fraction", "Верхняя доля силуэта",
+            self._double(0.1, 1.0, 0.05, 2), 0.5,
+        ).setToolTip("Доля высоты силуэта сверху, в которой заливаются пустоты.")
+
+        self._section(form, "Проработка волос")
+        self._add(form, "cut/hair_refine", "Уплотнять кайму волос", QCheckBox(), True).setToolTip(
+            "Поднимает альфу полупрозрачной каймы у головы, чтобы фон не просвечивал сквозь пряди."
+        )
+        self._add(
+            form, "cut/hair_top_fraction", "Верхняя доля силуэта",
+            self._double(0.1, 0.6, 0.05, 2), 0.30,
+        ).setToolTip("Область уплотнения: доля высоты силуэта сверху.")
+        self._add(
+            form, "cut/hair_min_mid", "Мин. пикселей каймы",
+            self._spin(1000, 200000, 1000), 25000,
+        ).setToolTip(
+            "Правило включается только при большом количестве полупрозрачных пикселей "
+            "в области головы; чистые кадры не меняются."
+        )
+        self._add(form, "cut/hair_gain", "Коэффициент альфы", self._double(1.0, 4.0, 0.1, 2), 3.0).setToolTip(
+            "Во сколько раз увеличивается альфа каймы: больше — плотнее волосы."
+        )
+
+        self._section(form, "Просветы между прядями")
+        self._add(form, "cut/color_gaps", "Убирать по цвету фона", QCheckBox(), True).setToolTip(
+            "Делает прозрачными пиксели, чей цвет близок к светло-голубому фону — просветы между прядями."
+        )
+        self._add(form, "cut/color_gap_lo", "Полное совпадение, d", self._double(0.0, 100.0, 5.0, 1), 45.0).setToolTip(
+            "При цветовом расстоянии до фона меньше этого значения альфа становится нулевой."
+        )
+        self._add(form, "cut/color_gap_hi", "Не трогать, d", self._double(20.0, 255.0, 5.0, 1), 100.0).setToolTip(
+            "При расстоянии больше этого значения альфа остаётся прежней; между ними — плавный переход."
+        )
+        self._add(
+            form, "cut/color_gap_top_fraction", "Верхняя доля силуэта",
+            self._double(0.1, 1.0, 0.05, 2), 0.35,
+        ).setToolTip("Область очистки: доля высоты силуэта сверху.")
+        self._add(
+            form, "cut/color_gap_min_blue", "Мин. синий минус красный",
+            self._double(0.0, 100.0, 5.0, 1), 25.0,
+        ).setToolTip(
+            "Правило включается, только если фон светло-голубой: синий канал фона "
+            "должен превосходить красный хотя бы на это значение. Другие кадры не меняются."
+        )
+
+        self._section(form, "Выход")
         self._add(form, "cut/format", "Формат выхода", self._combo(["PNG (RGBA)", "JPEG"]), "PNG (RGBA)")
         return page
 

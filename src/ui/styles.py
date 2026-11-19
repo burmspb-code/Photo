@@ -1,6 +1,11 @@
 """QSS-темы GUI. Одна шаблонная таблица и две палитры: тёмная и светлая."""
 
+from pathlib import Path
 from string import Template
+
+# Абсолютный путь нужен: QSS ищет url() относительно каталога процесса, а не
+# модуля. Слэши — прямые, иначе Qt на Windows не прочитает файл.
+_CHECK_MARK = (Path(__file__).resolve().parent / "icons" / "check_white.png").as_posix()
 
 _DARK = {
     "window": "#0f172a",
@@ -49,6 +54,13 @@ _DARK = {
     "zoom_text": "rgba(203, 213, 225, 200)",
     "zoom_groove": "rgba(148, 163, 184, 110)",
     "zoom_handle": "#94a3b8",
+    # Чекбоксы: тёмная неотмеченная клетка, синяя отмеченная и белая галочка.
+    "check_bg": "#0b1220",
+    "check_border": "#475569",
+    "check_checked": "#3b82f6",
+    "check_hover": "#60a5fa",
+    "check_disabled": "#1e293b",
+    "check_disabled_border": "#334155",
 }
 
 _LIGHT = {
@@ -98,6 +110,14 @@ _LIGHT = {
     "zoom_text": "rgba(71, 85, 105, 210)",
     "zoom_groove": "rgba(100, 116, 139, 90)",
     "zoom_handle": "#64748b",
+    # В светлой теме клетка белая; отмеченная — синяя, чтобы белая галочка
+    # читалась и на светлом фоне диалога.
+    "check_bg": "#ffffff",
+    "check_border": "#94a3b8",
+    "check_checked": "#2563eb",
+    "check_hover": "#60a5fa",
+    "check_disabled": "#e2e8f0",
+    "check_disabled_border": "#cbd5e1",
 }
 
 _STYLE = Template(
@@ -185,7 +205,9 @@ QScrollArea {
     border: 0;
 }
 QWidget#paramsViewport, QWidget#paramsContent,
-QWidget#aboutViewport, QWidget#aboutContent {
+QWidget#aboutViewport, QWidget#aboutContent,
+QWidget#helpViewport, QWidget#helpContent,
+QWidget#settingsCutViewport, QWidget#settingsCutContent {
     background: $zone_bg;
 }
 QWidget#previewPage {
@@ -365,6 +387,38 @@ QComboBox:hover, QLineEdit:hover, QSpinBox:hover, QDoubleSpinBox:hover {
 }
 QCheckBox {
     spacing: 8px;
+    background: transparent;
+    color: $text;
+}
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border-radius: 3px;
+    background: $check_bg;
+    border: 1px solid $check_border;
+}
+QCheckBox::indicator:hover {
+    border: 1px solid $accent;
+}
+QCheckBox::indicator:checked {
+    background: $check_checked;
+    border: 1px solid $check_checked;
+    image: url("$check_mark");
+}
+QCheckBox::indicator:checked:hover {
+    background: $check_hover;
+    border: 1px solid $check_hover;
+}
+QCheckBox::indicator:disabled {
+    background: $check_disabled;
+    border: 1px solid $check_disabled_border;
+}
+QCheckBox::indicator:checked:disabled {
+    background: $disabled;
+    border: 1px solid $disabled;
+}
+QCheckBox:disabled {
+    color: $disabled;
 }
 QSlider::groove:horizontal {
     background: $slider_groove;
@@ -409,7 +463,7 @@ QSplitter::handle {
 )
 
 THEMES = {
-    "Тёмная": _STYLE.substitute(_DARK),
-    "Светлая": _STYLE.substitute(_LIGHT),
+    "Тёмная": _STYLE.substitute(_DARK, check_mark=_CHECK_MARK),
+    "Светлая": _STYLE.substitute(_LIGHT, check_mark=_CHECK_MARK),
 }
 GLOBAL_STYLE = THEMES["Тёмная"]  # обратная совместимость
