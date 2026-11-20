@@ -5,12 +5,12 @@ import unittest
 from unittest.mock import patch
 
 from PyQt6.QtGui import QShowEvent
-from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QScrollArea
+from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QTabWidget, QWidget
 
-from src.ui.about_dialog import AboutDialog
+from src.ui.about_dialog import HELP_GROUPS, AboutDialog, _default_text, _render_help
 from src.ui.main_window import MainWindow
 from src.ui.settings_dialog import SettingsDialog
-from src.ui.styles import THEMES
+from src.ui.styles import THEMES, THEME_WINDOW_COLORS
 from tests.gui_case import GuiTestCase
 
 
@@ -69,7 +69,8 @@ class TestAboutDialog(GuiTestCase):
         # QSS задаёт фон через objectName; без него вьюпорт остаётся системным
         # светлым и светлый текст в тёмной теме становится нечитаемым.
         dialog = AboutDialog(self.window)
-        viewport = dialog.findChild(QScrollArea).viewport()
+        # В диалоге два QScrollArea; ищем вьюпорт именно вкладки «О приложении».
+        viewport = dialog.findChild(QWidget, "aboutContent").parentWidget()
         self.assertEqual(viewport.objectName(), "aboutViewport")
         for theme in THEMES:
             with self.subTest(theme=theme):
@@ -81,16 +82,16 @@ class TestAboutDialog(GuiTestCase):
              patch("src.ui.settings_dialog.apply_dark_titlebar") as settings_dwm:
             about = AboutDialog(self.window)
             about.showEvent(QShowEvent())
-            about_dwm.assert_called_once_with(about, True)
+            about_dwm.assert_called_once_with(about, True, THEME_WINDOW_COLORS["Тёмная"])
 
             self.window._apply_theme("Светлая")
             light_about = AboutDialog(self.window)
             light_about.showEvent(QShowEvent())
-            about_dwm.assert_called_with(light_about, False)
+            about_dwm.assert_called_with(light_about, False, THEME_WINDOW_COLORS["Светлая"])
 
             settings = SettingsDialog(self.window)
             settings.showEvent(QShowEvent())
-            settings_dwm.assert_called_once_with(settings, False)
+            settings_dwm.assert_called_once_with(settings, False, THEME_WINDOW_COLORS["Светлая"])
 
         self.window._apply_theme("Тёмная")
 
@@ -101,6 +102,69 @@ class TestAboutDialog(GuiTestCase):
         close = buttons.button(QDialogButtonBox.StandardButton.Close)
         self.assertIsNotNone(close)
         self.assertTrue(close.isEnabled())
+
+    def test_about_has_app_and_help_tabs(self) -> None:
+        dialog = AboutDialog(self.window)
+        tabs = dialog.findChild(QTabWidget)
+        self.assertIsNotNone(tabs)
+        self.assertEqual(tabs.count(), 2)
+        self.assertEqual(tabs.tabText(0), "О приложении")
+        self.assertEqual(tabs.tabText(1), "Помощь")
+        self.assertIsNotNone(dialog.findChild(QLabel, "aboutTitle"))
+        self.assertIsNotNone(dialog.findChild(QLabel, "helpText"))
+
+    def test_help_covers_every_settings_control(self) -> None:
+        """В справке должен быть описан каждый параметр из окна «Настройки»."""
+        help_keys = {
+            key
+            for _tab, sections in HELP_GROUPS
+            for _section_title, settings in sections
+            for key, _label, _description in settings
+        }
+        settings = SettingsDialog(self.window)
+        control_keys = set(settings.controls)
+        self.assertTrue(control_keys <= help_keys, f"нет справки для: {sorted(control_keys - help_keys)}")
+        self.assertEqual(help_keys, control_keys)
+
+    def test_help_group_titles_match_settings_tabs(self) -> None:
+        """Справка сгруппирована по тем же вкладкам, что и диалог настроек."""
+        tabs = SettingsDialog(self.window).findChild(QTabWidget)
+        ui_titles = tuple(tabs.tabText(i) for i in range(tabs.count()))
+        self.assertEqual(tuple(group[0] for group in HELP_GROUPS), ui_titles)
+
+    def test_help_text_has_descriptions_defaults_and_scenarios(self) -> None:
+        dialog = AboutDialog(self.window)
+        help_text = dialog.findChild(QLabel, "helpText").text()
+        for phrase in (
+            "на что",
+            "по умолчанию",
+            "birefnet-general",
+            "u2netp",
+            "Портретный режим",
+            "Контактная тень",
+            "когда",
+        ):
+            self.assertIn(phrase, help_text)
+        self.assertIn("по умолчанию: вкл.", help_text)
+        self.assertIn("по умолчанию: ×2", help_text)
+        self.assertIn("Сбросить настройки", help_text)
+        self.assertIn("OK", help_text)
+
+    def test_help_defaults_follow_presets(self) -> None:
+        """Строка «по умолчанию» берётся из APP_DEFAULTS, а не захардкожена."""
+        self.assertEqual(_default_text("cut/portrait"), "вкл.")
+        self.assertEqual(_default_text("compose/blur"), "0.5")
+        self.assertEqual(_default_text("upscale/factor"), "×2")
+        self.assertEqual(_default_text("bg/prompt"), "не сохраняется")
+        self.assertIn("по умолчанию: 0.5", _render_help())
+
+    def test_help_background_follows_theme(self) -> None:
+        dialog = AboutDialog(self.window)
+        help_content = dialog.findChild(QLabel, "helpText").parentWidget()
+        self.assertEqual(help_content.objectName(), "helpContent")
+        for theme in THEMES:
+            with self.subTest(theme=theme):
+                self.assertIn("QWidget#helpContent", THEMES[theme])
 
 
 if __name__ == "__main__":

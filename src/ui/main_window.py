@@ -53,7 +53,6 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
-    QComboBox,
     QDialog,
     QFileDialog,
     QFrame,
@@ -78,13 +77,21 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from src.core.cut_params import CUT_DEFAULTS
 from src.core.cutout import cut_advisory
 from src.core.image import _read, _write
 from src.core.settings import normalize_factor
 from src.core.tasks import compose_task, cut_task, genbg_task, upscale_task
 
 from .about_dialog import AboutDialog
-from .defaults import APP_DEFAULTS, PROMPT_PLACEHOLDER
+from .defaults import (
+    APP_DEFAULTS,
+    CUT_MODELS,
+    CUT_MODEL_HINTS,
+    CUT_MODEL_PREVIEW,
+    PROMPT_PLACEHOLDER,
+)
+from .animated_combo import AnimatedComboBox
 from .settings_dialog import SettingsDialog
 from .styles import THEMES
 from .workers import CoreWorker
@@ -107,16 +114,6 @@ SAVE_PRESETS = {
 # Кратность к вписанному кадру: 2^(value/100), поэтому -100 → ÷2, +200 → ×4.
 ZOOM_MIN, ZOOM_MAX = -100, 200
 ZOOM_LABELS = ((200, "×4"), (100, "×2"), (0, "×1"), (-100, "÷2"))
-CUT_MODELS = (
-    "birefnet-general",
-    "birefnet-portrait",
-    "birefnet-general-lite",
-    "birefnet-general-fp16",
-    "birefnet-massive",
-    "isnet-general-use",
-    "u2net",
-    "u2netp",
-)
 IMAGE_FILTER = "Images (*.jpg *.jpeg *.png *.bmp *.webp)"
 # Панель задач фиксированной ширины: QSplitter.setSizes() задаёт только стартовые
 # пропорции, поэтому при пересчёте лэйаута (загрузка фото, генерация, resize)
@@ -1037,8 +1034,14 @@ class MainWindow(QMainWindow):
         cut.setObjectName("taskCut")
         box = QVBoxLayout(cut)
         box.addWidget(QLabel("Модель:"))
-        self.cut_model = QComboBox()
+        self.cut_model = AnimatedComboBox()
         self.cut_model.addItems(CUT_MODELS)
+        for index, name in enumerate(CUT_MODELS):
+            self.cut_model.setItemData(index, CUT_MODEL_HINTS[name], Qt.ItemDataRole.ToolTipRole)
+        self.cut_model.setToolTip(
+            "Выбор сохраняется в настройках. "
+            + f"{CUT_MODEL_PREVIEW} — только для быстрого предпросмотра."
+        )
         box.addWidget(self.cut_model)
         self.portrait = QCheckBox("Портретный режим")
         box.addWidget(self.portrait)
@@ -1280,6 +1283,7 @@ class MainWindow(QMainWindow):
         self.btn_pick_source.clicked.connect(self.open_source)
         self.btn_pick_background.clicked.connect(self.open_background)
         self.btn_cut.clicked.connect(self.run_cut)
+        self.cut_model.currentTextChanged.connect(self._on_cut_model_changed)
         self.btn_compose.clicked.connect(self.run_compose)
         self.btn_stop.clicked.connect(self.stop_operation)
 
@@ -1668,6 +1672,17 @@ class MainWindow(QMainWindow):
         _slider, factor, label, fmt = self.sliders[key]
         label.setText(fmt.format(value / factor))
 
+    def _on_cut_model_changed(self, name: str) -> None:
+        """Запомнить модель, выбранную на панели задач.
+
+        Раньше комбо читало ``cut/model`` при запуске, но не сохраняло выбор:
+        диалог настроек показывал старое значение, а после перезапуска модель
+        сбрасывалась. Теперь источник истины — QSettings, как у остальных
+        параметров вырезки.
+        """
+        self.settings.setValue("cut/model", name)
+        self.settings.sync()
+
     # ---------- фоновые операции ----------
 
     def run_cut(self) -> None:
@@ -1675,17 +1690,9 @@ class MainWindow(QMainWindow):
         if not params["source"]:
             self._log("WARN", "Вырезка: сначала откройте исходное фото.")
             return
-        self._start_worker(
-            "Вырезка", cut_task, params["source"],
-            options={
-                "portrait": params["portrait"],
-                "model": params["cut_model"],
-                "tile": params["cut_tile"],
-                "sigma": params["cut_sigma"],
-                "head_ratio": params["cut_head_ratio"],
-                "matting": params["cut_matting"],
-            },
-        )
+        options = {key: params[key] for key in CUT_DEFAULTS}
+        options["model"] = params["cut_model"]
+        self._start_worker("Вырезка", cut_task, params["source"], options=options)
 
     def run_generate(self) -> None:
         params = self.current_params()
@@ -1890,6 +1897,8 @@ class MainWindow(QMainWindow):
         s = self.settings
         index = self.cut_model.findText(str(s.value("cut/model", APP_DEFAULTS["cut/model"])))
         if index >= 0:
+            # Не дёргаем currentTextChanged при загрузке: значение уже в QSettings.
+            blocker = QSignalBlocker(self.cut_model)
             self.cut_model.setCurrentIndex(index)
         self.portrait.setChecked(s.value("cut/portrait", APP_DEFAULTS["cut/portrait"], type=bool))
         # Промпт намеренно не восстанавливается: поле начинается пустым с подсказкой.
@@ -1954,6 +1963,14 @@ class MainWindow(QMainWindow):
             "compose_seed": self._setting_number("compose/seed", APP_DEFAULTS["compose/seed"], int),
             "upscale_factor": self._upscale_factor(),
         }
+        for key, default in CUT_DEFAULTS.items():
+            if key == "portrait":
+                continue  # чекбокс на панели — источник истины для портретного режима
+            if isinstance(default, bool):
+                params[key] = bool(self.settings.value(f"cut/{key}", default, type=bool))
+            else:
+                cast = int if isinstance(default, int) else float
+                params[key] = self._setting_number(f"cut/{key}", default, cast)
         for key, (slider, factor, _, _) in self.sliders.items():
             params[key] = slider.value() / factor
         return params

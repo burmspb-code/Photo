@@ -49,13 +49,35 @@ class TestDefaults(GuiTestCase):
 
     def test_apply_overwrites_stale_values(self) -> None:
         stored = app_settings()
-        stored.setValue("cut/model", "u2netp")
+        # u2net больше нет в списке моделей — миграция вернёт дефолт.
+        stored.setValue("cut/model", "u2net")
         stored.setValue("compose/blur", 0.72)
         stored.sync()
 
         self.assertTrue(apply_default_presets(stored))
         self.assertEqual(stored.value("cut/model"), "birefnet-general")
         self.assertEqual(float(stored.value("compose/blur")), 0.5)
+
+    def test_apply_keeps_u2netp_as_preview_model(self) -> None:
+        """Теперь u2netp — допустимая модель превью, а не устаревший ключ."""
+        stored = app_settings()
+        apply_default_presets(stored)
+        stored.setValue("cut/model", "u2netp")
+        stored.sync()
+
+        self.assertFalse(apply_default_presets(app_settings()))
+        self.assertEqual(app_settings().value("cut/model"), "u2netp")
+
+    def test_apply_repairs_removed_model_without_resetting_params(self) -> None:
+        stored = app_settings()
+        apply_default_presets(stored)
+        stored.setValue("cut/model", "birefnet-massive")
+        stored.setValue("compose/blur", 1.1)
+        stored.sync()
+
+        self.assertTrue(apply_default_presets(app_settings()))
+        self.assertEqual(app_settings().value("cut/model"), "birefnet-general")
+        self.assertEqual(float(app_settings().value("compose/blur")), 1.1)
 
     def test_apply_keeps_user_changes_after_migration(self) -> None:
         stored = app_settings()
@@ -79,6 +101,19 @@ class TestDefaults(GuiTestCase):
             self.assertEqual(params["cut_model"], "birefnet-general")
             self.assertEqual(params["cut_tile"], 1024)
             self.assertEqual(params["blur"], 0.5)
+        finally:
+            window.close()
+            window.deleteLater()
+            self.process_events()
+
+    def test_main_window_persists_model_choice(self) -> None:
+        """Комбо на панели задач должно писать cut/model, а не только читать."""
+        apply_default_presets(app_settings())
+        window = MainWindow()
+        try:
+            window.cut_model.setCurrentText("u2netp")
+            self.assertEqual(app_settings().value("cut/model"), "u2netp")
+            self.assertEqual(window.current_params()["cut_model"], "u2netp")
         finally:
             window.close()
             window.deleteLater()

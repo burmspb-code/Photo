@@ -5,6 +5,7 @@ from collections import Counter
 
 from PyQt6.QtGui import QColor
 
+from src.ui.defaults import CUT_MODEL_HINTS
 from src.ui.main_window import (
     CUT_MODELS,
     LEVEL_COLORS,
@@ -88,8 +89,15 @@ class TestConstants(GuiTestCase):
         )
 
     def test_cut_models(self) -> None:
-        self.assertGreaterEqual(len(CUT_MODELS), 5)
-        self.assertIn("birefnet-general", CUT_MODELS)
+        """Только проверенные модели: две BiRefNet, ISNet и u2netp для превью."""
+        self.assertEqual(
+            CUT_MODELS,
+            ("birefnet-general", "birefnet-portrait", "isnet-general-use", "u2netp"),
+        )
+        for removed in ("birefnet-general-lite", "birefnet-general-fp16",
+                        "birefnet-massive", "u2net"):
+            self.assertNotIn(removed, CUT_MODELS)
+        self.assertEqual(set(CUT_MODEL_HINTS), set(CUT_MODELS))
 
     def test_log_levels(self) -> None:
         self.assertEqual(set(LEVEL_COLORS), {"OK", "HINT", "INFO", "WARN", "ERROR"})

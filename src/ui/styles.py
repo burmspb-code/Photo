@@ -1,9 +1,27 @@
 """QSS-темы GUI. Одна шаблонная таблица и две палитры: тёмная и светлая."""
 
+from pathlib import Path
 from string import Template
+
+# Абсолютный путь нужен: QSS ищет url() относительно каталога процесса, а не
+# модуля. Слэши — прямые, иначе Qt на Windows не прочитает файл.
+_ICONS = Path(__file__).resolve().parent / "icons"
+_CHECK_MARK = (_ICONS / "check_white.png").as_posix()
+# Современный шеврон для комбобоксов: свой цвет под каждую тему, чтобы
+# стрелка читалась и на тёмном, и на светлом фоне поля ввода.
+_COMBO_ARROW_DARK = (_ICONS / "combo_arrow_dark.png").as_posix()
+_COMBO_ARROW_LIGHT = (_ICONS / "combo_arrow_light.png").as_posix()
+# Такие же стрелки для числовых полей (QSpinBox/QDoubleSpinBox).
+_SPIN_UP_DARK = (_ICONS / "spin_up_dark.png").as_posix()
+_SPIN_DOWN_DARK = (_ICONS / "spin_down_dark.png").as_posix()
+_SPIN_UP_LIGHT = (_ICONS / "spin_up_light.png").as_posix()
+_SPIN_DOWN_LIGHT = (_ICONS / "spin_down_light.png").as_posix()
 
 _DARK = {
     "window": "#0f172a",
+    "down_arrow": _COMBO_ARROW_DARK,
+    "spin_up": _SPIN_UP_DARK,
+    "spin_down": _SPIN_DOWN_DARK,
     "text": "#e2e8f0",
     "zone_bg": "#1e293b",
     "zone_border": "#334155",
@@ -49,10 +67,20 @@ _DARK = {
     "zoom_text": "rgba(203, 213, 225, 200)",
     "zoom_groove": "rgba(148, 163, 184, 110)",
     "zoom_handle": "#94a3b8",
+    # Чекбоксы: тёмная неотмеченная клетка, синяя отмеченная и белая галочка.
+    "check_bg": "#0b1220",
+    "check_border": "#475569",
+    "check_checked": "#3b82f6",
+    "check_hover": "#60a5fa",
+    "check_disabled": "#1e293b",
+    "check_disabled_border": "#334155",
 }
 
 _LIGHT = {
     "window": "#f1f5f9",
+    "down_arrow": _COMBO_ARROW_LIGHT,
+    "spin_up": _SPIN_UP_LIGHT,
+    "spin_down": _SPIN_DOWN_LIGHT,
     "text": "#0f172a",
     "zone_bg": "#ffffff",
     "zone_border": "#cbd5e1",
@@ -98,6 +126,14 @@ _LIGHT = {
     "zoom_text": "rgba(71, 85, 105, 210)",
     "zoom_groove": "rgba(100, 116, 139, 90)",
     "zoom_handle": "#64748b",
+    # В светлой теме клетка белая; отмеченная — синяя, чтобы белая галочка
+    # читалась и на светлом фоне диалога.
+    "check_bg": "#ffffff",
+    "check_border": "#94a3b8",
+    "check_checked": "#2563eb",
+    "check_hover": "#60a5fa",
+    "check_disabled": "#e2e8f0",
+    "check_disabled_border": "#cbd5e1",
 }
 
 _STYLE = Template(
@@ -185,7 +221,9 @@ QScrollArea {
     border: 0;
 }
 QWidget#paramsViewport, QWidget#paramsContent,
-QWidget#aboutViewport, QWidget#aboutContent {
+QWidget#aboutViewport, QWidget#aboutContent,
+QWidget#helpViewport, QWidget#helpContent,
+QWidget#settingsCutViewport, QWidget#settingsCutContent {
     background: $zone_bg;
 }
 QWidget#previewPage {
@@ -363,8 +401,119 @@ QComboBox, QLineEdit, QSpinBox, QDoubleSpinBox, QPlainTextEdit {
 QComboBox:hover, QLineEdit:hover, QSpinBox:hover, QDoubleSpinBox:hover {
     border-color: $button_border;
 }
+/* Кнопка стрелки: современный шеврон из PNG вместо системного «устаревшего»
+   треугольника. Обязательно задаём ::down-arrow И состояния :hover/:pressed —
+   без них Qt убирает стрелку и перерисовывает сабконтроль при открытии. */
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 28px;
+    border: 0;
+    background: transparent;
+    border-top-right-radius: 5px;
+    border-bottom-right-radius: 5px;
+}
+QComboBox::down-arrow {
+    image: url("$down_arrow");
+    width: 16px;
+    height: 16px;
+}
+QComboBox::drop-down:hover {
+    background: $button_hover;
+}
+QComboBox::drop-down:pressed {
+    background: $button_hover;
+}
+/* Выпадающий список — отдельное окно со своей палитрой. Без явного стиля
+   Qt берёт системную светлую палитру (#f3f3f3), и при открытии в тёмной теме
+   список сначала рисуется светлым, а потом перекрашивается. */
+QComboBox QAbstractItemView {
+    background: $menu_popup;
+    border: 1px solid $zone_border;
+    border-radius: 5px;
+    padding: 2px;
+    color: $text;
+    selection-background-color: $accent;
+    selection-color: $accent_text;
+    outline: 0;
+}
+QComboBox QAbstractItemView::item {
+    min-height: 22px;
+    padding: 4px 8px;
+}
+QComboBox QAbstractItemView::item:hover {
+    background: $menu_selected;
+    color: $text;
+}
+/* Числовые поля: те же шевроны, что и у комбо, только разделены на
+   верхнюю/нижнюю кнопки. Без явных ::up-arrow/::down-arrow Qt оставляет
+   системные «устаревшие» треугольники. */
+QSpinBox::up-button, QDoubleSpinBox::up-button {
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 18px;
+    height: 50%;
+    border: 0;
+    background: transparent;
+    border-top-right-radius: 5px;
+}
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    subcontrol-origin: padding;
+    subcontrol-position: bottom right;
+    width: 18px;
+    height: 50%;
+    border: 0;
+    background: transparent;
+    border-bottom-right-radius: 5px;
+}
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
+    background: $button_hover;
+}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+    image: url("$spin_up");
+    width: 12px;
+    height: 12px;
+}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+    image: url("$spin_down");
+    width: 12px;
+    height: 12px;
+}
 QCheckBox {
     spacing: 8px;
+    background: transparent;
+    color: $text;
+}
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border-radius: 3px;
+    background: $check_bg;
+    border: 1px solid $check_border;
+}
+QCheckBox::indicator:hover {
+    border: 1px solid $accent;
+}
+QCheckBox::indicator:checked {
+    background: $check_checked;
+    border: 1px solid $check_checked;
+    image: url("$check_mark");
+}
+QCheckBox::indicator:checked:hover {
+    background: $check_hover;
+    border: 1px solid $check_hover;
+}
+QCheckBox::indicator:disabled {
+    background: $check_disabled;
+    border: 1px solid $check_disabled_border;
+}
+QCheckBox::indicator:checked:disabled {
+    background: $disabled;
+    border: 1px solid $disabled;
+}
+QCheckBox:disabled {
+    color: $disabled;
 }
 QSlider::groove:horizontal {
     background: $slider_groove;
@@ -409,7 +558,13 @@ QSplitter::handle {
 )
 
 THEMES = {
-    "Тёмная": _STYLE.substitute(_DARK),
-    "Светлая": _STYLE.substitute(_LIGHT),
+    "Тёмная": _STYLE.substitute(_DARK, check_mark=_CHECK_MARK),
+    "Светлая": _STYLE.substitute(_LIGHT, check_mark=_CHECK_MARK),
+}
+# Точный цвет фона окна — его же ставим системной шапке через DWM, иначе
+# нативная строка заголовка остаётся серой и не совпадает с фоном диалога.
+THEME_WINDOW_COLORS: dict[str, str] = {
+    "Тёмная": _DARK["window"],
+    "Светлая": _LIGHT["window"],
 }
 GLOBAL_STYLE = THEMES["Тёмная"]  # обратная совместимость
